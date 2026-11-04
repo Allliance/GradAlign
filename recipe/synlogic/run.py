@@ -60,6 +60,10 @@ def overrides(root, condition, framework, gpus):
                '+mixture.condition=' + condition, '+mixture.root=' + str(root),
                '+provenance.protocol_id=' + metadata['protocol_id'],
                '+provenance.prompt_template_sha256=' + metadata['prompt_template_sha256']]
+    if condition == 'mixture-gradalign':
+        result += ['+gradalign.selection_interval=10', '+gradalign.selection_ratio=4',
+                   '+gradalign.reference_rollouts=16', '+gradalign.candidate_rollouts=16',
+                   '+gradalign.candidate_chunk=64']
     return result
 
 
@@ -71,8 +75,6 @@ def main():
     parser.add_argument('--gpus', type=int, choices=range(1, 5), default=4)
     parser.add_argument('--resolve-only', action='store_true')
     args, extra = parser.parse_known_args()
-    if args.condition in ('mixture-gradient-equal', 'mixture-gradalign'):
-        raise NotImplementedError('This method must pass its own implementation and launch checks before use')
     root, framework = args.root.resolve(), args.framework_code.resolve()
     run = root / 'runs' / args.condition
     if (root / 'STOP').exists() or (run / 'STOP').exists():
@@ -98,6 +100,10 @@ def main():
         import torch
         if torch.cuda.device_count() != args.gpus:
             raise ValueError('Visible GPU count differs from the authorized run allocation')
+        for device in range(args.gpus):
+            free,total=torch.cuda.mem_get_info(device)
+            if total-free > 1024**3:
+                raise ValueError('Assigned GPU has an unreconciled existing workload')
         for line in Path(os.environ['SYNLOGIC_WANDB_ENV']).read_text().splitlines():
             line = line.strip().removeprefix('export ')
             if line.startswith('WANDB_') and '=' in line:

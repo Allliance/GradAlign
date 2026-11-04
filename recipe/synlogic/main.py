@@ -30,10 +30,12 @@ class TaskRunner:
         from src.syn_logic_reward import SynLogicRewardManager
         from .trainer import SynLogicTrainer
         from .template import verify_base_template
+        from .alignment_worker import AlignmentWorker
 
         OmegaConf.resolve(config)
         tokenizer = verify_base_template(hf_tokenizer(config.actor_rollout_ref.model.path))
-        roles = {Role.ActorRollout: ray.remote(ActorRolloutRefWorker),
+        actor_class = AlignmentWorker if config.mixture.condition == 'mixture-gradalign' else ActorRolloutRefWorker
+        roles = {Role.ActorRollout: ray.remote(actor_class),
                  Role.RefPolicy: ray.remote(ActorRolloutRefWorker)}
         manager = ResourcePoolManager(resource_pool_spec={'training': [config.trainer.n_gpus_per_node]},
                                       mapping={role: 'training' for role in roles})
