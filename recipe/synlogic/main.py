@@ -13,8 +13,11 @@ import ray
             config_name='dapo_trainer', version_base=None)
 def main(config):
     gpus = config.trainer.n_gpus_per_node
+    # Full-gradient selection broadcasts several copies of a 16-response batch.
+    # Keep these objects in shared memory instead of spilling to local disk.
+    object_store_gib = 48 if config.mixture.condition == 'mixture-gradalign' else 8
     ray.init(num_cpus=config.ray_init.num_cpus, num_gpus=gpus, include_dashboard=False,
-             object_store_memory=8 * 1024**3, _temp_dir='/run/synlogic-cache/ray',
+             object_store_memory=object_store_gib * 1024**3, _temp_dir='/run/synlogic-cache/ray',
              runtime_env={'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN',
                                        'VLLM_LOGGING_LEVEL': 'WARN'}})
     ray.get(TaskRunner.remote().run.remote(config))
