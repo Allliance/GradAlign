@@ -17,7 +17,7 @@ def main():
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--root', type=Path, required=True)
     args = parser.parse_args()
-    source = args.source / 'data'
+    source = args.source.resolve() / 'data'
     output = args.root / 'data/prepared'
     output.mkdir(parents=True, exist_ok=True)
     if (output / 'manifest.json').exists():

@@ -2,7 +2,7 @@
 
 This recipe adapts the released GradAlign selection loss to the project's
 four-GPU VERL runtime. It also runs the matched GRPO baselines. Use the parent
-project's [protocol](https://github.com/Allliance/noisy-rlvr-parent/blob/codex/qwen3-synlogic-mixtures-20261103/experiments/protocols/qwen3-synlogic-mixtures-20261103.md)
+project's [protocol](https://github.com/Allliance/noisy-rlvr-parent/blob/43c013f/experiments/protocols/qwen3-synlogic-mixtures-20261103.md)
 for frozen memberships, noise masks, and comparison limits.
 
 Prepare inputs once from the existing audited SynLogic run store:
@@ -29,7 +29,11 @@ model. Other conditions are `noise30`, `noise10`, `small1-noise10`,
 pinned training environment rather than mixing the upstream repositories'
 environments.
 
-GradAlign uses the released `select/grpo_loss.py`, full FSDP gradient shards,
+GradAlign deliberately uses the released `select/grpo_loss.py` variant: mean
+over tokens within each response, then mean over responses for each problem.
+The upstream `select/parallel/grpo_loss.py` instead weights longer responses
+more; that variant is not used here. FSDP distributes the chosen objective
+without changing its reduction. Selection uses full FSDP gradient shards,
 16 responses per reference/candidate prompt, a candidate-to-selection ratio
 of 4, and selection every 10 training updates. The 156-prompt smaller training
 pool supplies guidance; the larger training pool supplies candidates. Zero
