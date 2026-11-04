@@ -34,7 +34,8 @@ def main():
   actor_module=model
   actor_optimizer=optimizer
   def _forward_micro_batch(self,batch,temperature,calculate_entropy):return None,self.actor_module(batch['x'])
- fake=types.SimpleNamespace(actor=Actor(),ulysses_sharding_manager=contextlib.nullcontext())
+ fake=types.SimpleNamespace(actor=Actor(),ulysses_sharding_manager=contextlib.nullcontext(),
+                            config=types.SimpleNamespace(actor=types.SimpleNamespace(ppo_max_token_len_per_gpu=28672)))
  for name in ['_alignment_backward','_alignment_gradients']:
   setattr(fake,name,types.MethodType(getattr(AlignmentWorker,name),fake))
  fake._norm=AlignmentWorker._norm

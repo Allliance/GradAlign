@@ -31,15 +31,19 @@ class AlignmentWorker(ActorRolloutRefWorker):
         # All ranks process the same problem and equal counts of its responses.
         # FSDP therefore averages that problem's full gradient, rather than
         # accidentally mixing different problems in its gradient reductions.
-        for offset in range(samples // world):
-            index = start + rank + offset * world
-            batch = data.batch[index:index+1].to(device)
+        per_rank = samples // world
+        longest = int(data.batch['attention_mask'][start:start+samples].sum(-1).max())
+        budget = self.config.actor.ppo_max_token_len_per_gpu
+        chunk_size = min(per_rank, max(1, budget // longest))
+        for offset in range(0, per_rank, chunk_size):
+            indices = [start + rank + index * world for index in range(offset, min(offset+chunk_size, per_rank))]
+            batch = data.batch[indices].to(device)
             mask = batch['attention_mask'][:, -batch['responses'].shape[-1]:]
             with open(os.devnull, 'w') as sink, contextlib.redirect_stdout(sink):
                 _, log_prob = self.actor._forward_micro_batch(
                     batch, temperature=1.0, calculate_entropy=False)
                 loss = loss_function(log_prob.detach(), log_prob, batch['advantages'], mask)
-                (loss * scale / (samples // world)).backward()
+                (loss * scale / per_rank).backward()
 
     def _alignment_gradients(self):
         return [parameter.grad.detach().float().clone() if parameter.grad is not None
