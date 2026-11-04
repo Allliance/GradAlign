@@ -69,8 +69,8 @@ class AlignmentMixin:
         original = DataProto.from_single_dict(collate_fn([self.train_dataset[index] for index in indices]))
         generation = original.pop(batch_keys=['input_ids', 'attention_mask', 'position_ids'],
                                   non_tensor_batch_keys=['raw_prompt_ids'])
-        generation.meta_info.update(n=samples, do_sample=True, temperature=1.0,
-                                    top_p=1.0, top_k=-1)
+        generation.meta_info.update(do_sample=True, sampling_params={
+            'n': samples, 'temperature': 1.0, 'top_p': 1.0, 'top_k': -1})
         outputs = self.actor_rollout_wg.generate_sequences(generation)
         original.non_tensor_batch['uid'] = np.array([str(i) for i in indices], dtype=object)
         batch = original.repeat(repeat_times=samples, interleave=True).union(outputs)
