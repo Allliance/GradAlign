@@ -43,6 +43,24 @@ def finite(value):
                 require(torch.isfinite(flat[start:start+2**20]).all().item(), 'Non-finite checkpoint tensor')
 
 
+def model_parameter_counts(model, tied_embeddings=False):
+    serialized = sum(t.numel() for t in tensors(model))
+    unique = serialized
+    if tied_embeddings:
+        embedding_keys = [k for k in model if k.endswith('embed_tokens.weight')]
+        head_keys = [k for k in model if k.endswith('lm_head.weight')]
+        require(len(embedding_keys) == len(head_keys) == 1, 'Missing tied embedding or output-head entry')
+        embeddings, heads = list(tensors(model[embedding_keys[0]])), list(tensors(model[head_keys[0]]))
+        require(len(embeddings) == len(heads), 'Tied-weight shard counts differ')
+        for embedding, head in zip(embeddings, heads):
+            require(embedding.shape == head.shape, 'Tied-weight shard shapes differ')
+            left, right = embedding.reshape(-1), head.reshape(-1)
+            for start in range(0, left.numel(), 2**20):
+                require(torch.equal(left[start:start+2**20], right[start:start+2**20]), 'Tied embedding/output weights differ')
+        unique -= sum(t.numel() for t in heads)
+    return unique, serialized
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('checkpoint', type=Path)
@@ -75,7 +93,11 @@ def main():
     with torch.serialization.set_default_mmap_options(mmap.MAP_SHARED):
         model = torch.load(folder/'actor'/('model_'+suffix),map_location='cpu',weights_only=False,mmap=True)
         require(all(any(f'layers.{i}.' in key for key in model) for i in range(state.get('expected_model_layers', 36))), 'Missing transformer layers')
-        count = sum(t.numel() for t in tensors(model))
+        config_path = folder / 'actor/huggingface/config.json'
+        if not config_path.exists():
+            config_path = folder.parents[3] / 'model/config.json'
+        model_config = json.loads(config_path.read_text())
+        count, serialized_count = model_parameter_counts(model, model_config.get('tie_word_embeddings', False))
         finite(model)
         del model
         optimizer = torch.load(folder/'actor'/('optim_'+suffix),map_location='cpu',weights_only=False,mmap=True)
@@ -99,6 +121,7 @@ def main():
         require('synlogic_plan_generator' in loader and 'synlogic_plan_shape' in loader, 'Missing sampler state')
         result = {**state,'validated':True,'model_parameters':parameters,
                   'minimum_optimizer_counter':min(counters),
+                  'tied_embeddings_verified':model_config.get('tie_word_embeddings', False),
                   'components':['all_model_shards','all_optimizer_shards','all_scheduler_and_rng_shards',
                                 'dataloader','sampler_generator_and_index_plan','experiment_state']}
         temporary = folder/'validated.tmp'

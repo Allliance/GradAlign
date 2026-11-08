@@ -86,7 +86,8 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
             state = json.loads((folder / 'experiment_state.json').read_text())
             if (state['step'] != self.global_steps or state['protocol_id'] != self.config.provenance.protocol_id
                     or state['prompt_template_sha256'] != self.config.provenance.prompt_template_sha256
-                    or state['world_size'] != self.config.trainer.n_gpus_per_node):
+                    or state['world_size'] != self.config.trainer.n_gpus_per_node
+                    or (state.get('expected_model_parameters') is not None and state['expected_model_parameters'] != self.config.provenance.get('model_parameters'))):
                 raise ValueError('Incompatible full-state recovery checkpoint')
         return result
 
