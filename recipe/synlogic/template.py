@@ -10,7 +10,7 @@ def verify_base_template(tokenizer):
     if hashlib.sha256(tokenizer.chat_template.encode()).hexdigest() != PINNED_TEMPLATE_SHA256:
         raise ValueError("The pinned base-model template was modified")
     messages = [{"role": "user", "content": "Template verification."}]
-    # This call deliberately matches RLHFDataset: no thinking keyword is passed.
+    # This call deliberately matches RLHFDataset: the base template has no thinking prefix.
     actual = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     explicit = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
                                              enable_thinking=True)

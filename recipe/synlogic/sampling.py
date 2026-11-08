@@ -36,10 +36,10 @@ class PlanIterator:
 
 
 class PlanSampler:
-    def __init__(self, dataset, mode, seed=42, batch_size=160):
+    def __init__(self, dataset, mode, seed=42, batch_size=160, batches_per_pass=97):
         self.dataset, self.mode, self.batch_size = dataset, mode, batch_size
         self.generator = torch.Generator().manual_seed(seed)
-        self.num_samples = 97 * batch_size
+        self.num_samples = batches_per_pass * batch_size
         pools = dataset.dataframe['extra_info']
         self.small = [i for i, extra in enumerate(pools) if extra.get('pool') == 'small']
         self.large = [i for i, extra in enumerate(pools) if extra.get('pool') == 'large']

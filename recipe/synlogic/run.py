@@ -1,6 +1,7 @@
 """Launch a frozen SynLogic protocol on one to four GPUs."""
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -8,7 +9,7 @@ from pathlib import Path
 import shlex
 import sys
 
-CONDITIONS = ('noise30', 'noise10', 'small1-noise10', 'mixture-sampling99',
+CONDITIONS = ('full-clean', 'noise50', 'noise30', 'noise10', 'small1-noise10', 'mixture-sampling99',
               'mixture-gradient-equal', 'mixture-gradalign')
 
 
@@ -17,7 +18,7 @@ def overrides(root, condition, framework, gpus):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     values = module.overrides(root, 'full-clean')
-    dataset = condition if condition in CONDITIONS[:3] else 'mixture'
+    dataset = condition if not condition.startswith('mixture-') else 'mixture'
     replacements = {
         'data.train_files': str(root / 'data/prepared' / f'{dataset}.parquet'),
         'data.train_batch_size': '160', 'data.gen_batch_size': '160',
@@ -54,12 +55,22 @@ def overrides(root, condition, framework, gpus):
             result.append(value)
     result += [key + '=' + value for key, value in replacements.items()]
     metadata = json.loads((root / 'runs' / condition / 'portable-provenance.json').read_text())
-    result += ['actor_rollout_ref.actor.kl_loss_type=low_var_kl',
+    result = [v if not v.startswith('trainer.experiment_name=') else 'trainer.experiment_name=' + metadata.get('experiment_name', v.split('=', 1)[1]) for v in result]
+    if hashlib.sha256((root / 'data/prepared' / (dataset + '.parquet')).read_bytes()).hexdigest() != metadata['data_fingerprint']:
+        raise ValueError('Training parquet fingerprint differs from frozen provenance')
+    result += ['+trainer.rollout_snapshot_dir=' + str(root / 'runs' / condition / 'rollout_snapshots'),
+               'actor_rollout_ref.actor.kl_loss_type=low_var_kl',
                'actor_rollout_ref.rollout.do_sample=True',
                '+actor_rollout_ref.rollout.stop_token_ids=[151643,151645]',
                '+mixture.condition=' + condition, '+mixture.root=' + str(root),
                '+provenance.protocol_id=' + metadata['protocol_id'],
-               '+provenance.prompt_template_sha256=' + metadata['prompt_template_sha256']]
+               '+provenance.prompt_template_sha256=' + metadata['prompt_template_sha256'],
+               '+provenance.model_revision=' + metadata['model_revision'],
+               '+provenance.data_fingerprint=' + metadata['data_fingerprint'],
+               '+provenance.source_revision=' + json.dumps(metadata['source_revision'])]
+    if metadata.get('expected_model_parameters'):
+        result += ['+provenance.model_layers=' + str(metadata['expected_model_layers']),
+                   '+provenance.model_parameters=' + str(metadata['expected_model_parameters'])]
     if condition == 'mixture-gradalign':
         result += ['+gradalign.selection_interval=10', '+gradalign.selection_ratio=4',
                    '+gradalign.reference_rollouts=16', '+gradalign.candidate_rollouts=16',

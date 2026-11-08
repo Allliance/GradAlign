@@ -74,7 +74,7 @@ def main():
     suffix = f'world_size_{world}_rank_{rank}.pt'
     with torch.serialization.set_default_mmap_options(mmap.MAP_SHARED):
         model = torch.load(folder/'actor'/('model_'+suffix),map_location='cpu',weights_only=False,mmap=True)
-        require(all(any(f'layers.{i}.' in key for key in model) for i in range(36)), 'Missing transformer layers')
+        require(all(any(f'layers.{i}.' in key for key in model) for i in range(state.get('expected_model_layers', 36))), 'Missing transformer layers')
         count = sum(t.numel() for t in tensors(model))
         finite(model)
         del model
@@ -91,7 +91,9 @@ def main():
     counts = torch.tensor([count],dtype=torch.int64)
     dist.all_reduce(counts)
     parameters = int(counts.item())
-    require(3_900_000_000 <= parameters <= 4_600_000_000, f'Incomplete Qwen3-4B model: {parameters}')
+    expected_parameters = state.get('expected_model_parameters')
+    require(parameters == expected_parameters if expected_parameters else 3_900_000_000 <= parameters <= 4_600_000_000,
+            f'Incomplete model parameter count: {parameters}; expected {expected_parameters}')
     if rank == 0:
         loader = torch.load(folder/'data.pt',map_location='cpu',weights_only=False)
         require('synlogic_plan_generator' in loader and 'synlogic_plan_shape' in loader, 'Missing sampler state')

@@ -52,7 +52,8 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
         if train_dataset is None:
             train_dataset = create_rl_dataset(self.config.data.train_files, self.config.data, self.tokenizer, self.processor)
         sampler = PlanSampler(train_dataset, self.config.mixture.condition,
-                              seed=self.config.data.seed, batch_size=self.config.data.train_batch_size)
+                              seed=self.config.data.seed, batch_size=self.config.data.train_batch_size,
+                              batches_per_pass=self.config.mixture.get("batches_per_pass", 97))
         super()._create_dataloader(train_dataset, val_dataset, collate_fn, sampler)
         original = self.train_dataloader
         if self.config.mixture.condition == 'mixture-gradalign':
@@ -69,6 +70,8 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
         state = {'step': self.global_steps, 'protocol_id': self.config.provenance.protocol_id,
                  'prompt_template_sha256': self.config.provenance.prompt_template_sha256,
                  'condition': self.config.mixture.condition, 'world_size': self.config.trainer.n_gpus_per_node,
+                 'expected_model_layers': self.config.provenance.get('model_layers', 36),
+                 'expected_model_parameters': self.config.provenance.get('model_parameters', None),
                  'optimizer_updates': self.global_steps * (self.config.data.train_batch_size // self.config.actor_rollout_ref.actor.ppo_mini_batch_size)}
         path = folder / 'experiment_state.json'
         temporary = path.with_suffix('.tmp')
