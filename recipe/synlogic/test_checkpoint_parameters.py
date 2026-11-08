@@ -3,7 +3,7 @@ from pathlib import Path
 import unittest
 import torch
 
-source=Path('/shared/data/home/aa3242/scratch/worktrees/gradalign-noise-diagnostics-20261108/recipe/synlogic/validate_checkpoint.py')
+source=Path(__file__).with_name('validate_checkpoint.py')
 spec=importlib.util.spec_from_file_location('checkpoint_validation',source)
 module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 
