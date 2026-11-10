@@ -42,6 +42,8 @@ class OPDReferenceWorker(AllocatedGPUWorker):
         config = deepcopy(config)
         with open_dict(config.actor):
             config.actor.ulysses_sequence_parallel_size = 1
+        with open_dict(config.ref):
+            config.ref.ulysses_sequence_parallel_size = 1
         with open_dict(config.actor.fsdp_config):
             config.actor.fsdp_config.fsdp_size = 1
         super().__init__(config, role)
