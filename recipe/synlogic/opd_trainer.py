@@ -10,6 +10,17 @@ from .trainer import SynLogicTrainer
 
 
 class OPDTrainer(SynLogicTrainer):
+    def init_workers(self):
+        super().init_workers()
+        student = self.actor_rollout_wg.opd_device_identity()[0]
+        teacher = self.ref_policy_wg.opd_device_identity()[0]
+        if student['assigned'] == teacher['assigned']:
+            raise ValueError('Student and teacher must have distinct allocated GPUs')
+        if student['visibility_unmasked'] and student['current_device'] == teacher['current_device']:
+            raise ValueError('Student and teacher landed on the same physical GPU')
+        root = Path(os.environ['SYNLOGIC_RUN_ROOT'])
+        (root/'device-placement.json').write_text(json.dumps({'student':student,'teacher':teacher},indent=2)+'\n')
+
     def _transform_advantages(self, batch, metrics):
         settings = self.config.opd
         outcome_metrics = noise_metrics(batch)

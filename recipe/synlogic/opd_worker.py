@@ -1,5 +1,6 @@
 """One student GPU and one frozen base-reference/teacher GPU per OPD run."""
 from copy import deepcopy
+import os
 
 import torch
 from omegaconf import OmegaConf, open_dict
@@ -9,9 +10,34 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils.device import get_device_id
 from verl.workers.actor import DataParallelPPOActor
 from verl.workers.fsdp_workers import ActorRolloutRefWorker
+from verl.utils.ray_utils import ray_noset_visible_devices
 
 
-class OPDReferenceWorker(ActorRolloutRefWorker):
+class AllocatedGPUWorker(ActorRolloutRefWorker):
+    def __init__(self, config, role):
+        # Separate world-size-one pools both have group-local rank zero. On this
+        # ROCm image Ray leaves device visibility unchanged, so use its actual
+        # allocated GPU rather than that group-local rank.
+        if ray_noset_visible_devices():
+            import ray
+            assigned = ray.get_gpu_ids()
+            if len(assigned) != 1:
+                raise ValueError('Each OPD role requires exactly one Ray-assigned GPU')
+            device = int(float(assigned[0]))
+            os.environ['RAY_LOCAL_RANK'] = str(device)
+            os.environ['LOCAL_RANK'] = str(device)
+            torch.cuda.set_device(device)
+        super().__init__(config, role)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def opd_device_identity(self):
+        import ray
+        return {'role': self.role, 'assigned': ray.get_gpu_ids(),
+                'current_device': torch.cuda.current_device(),
+                'visibility_unmasked': ray_noset_visible_devices()}
+
+
+class OPDReferenceWorker(AllocatedGPUWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         super().init_model()
@@ -43,7 +69,7 @@ class OPDReferenceWorker(ActorRolloutRefWorker):
         return result.union(teacher)
 
 
-class OPDActorWorker(ActorRolloutRefWorker):
+class OPDActorWorker(AllocatedGPUWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def calibrate_opd(self, data):
         """Measure real policy gradients without changing weights or Adam state."""
