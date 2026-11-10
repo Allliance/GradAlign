@@ -1,4 +1,4 @@
-"""One student GPU and one frozen base-reference/teacher GPU per OPD run."""
+"""Student workers and a separate frozen base-reference/teacher worker."""
 from copy import deepcopy
 import os
 
@@ -15,9 +15,8 @@ from verl.utils.ray_utils import ray_noset_visible_devices
 
 class AllocatedGPUWorker(ActorRolloutRefWorker):
     def __init__(self, config, role):
-        # Separate world-size-one pools both have group-local rank zero. On this
-        # ROCm image Ray leaves device visibility unchanged, so use its actual
-        # allocated GPU rather than that group-local rank.
+        # This ROCm image leaves visibility unchanged; a role's local rank need
+        # not match its Ray-assigned device, especially across separate pools.
         if ray_noset_visible_devices():
             import ray
             assigned = ray.get_gpu_ids()
@@ -33,11 +32,20 @@ class AllocatedGPUWorker(ActorRolloutRefWorker):
     def opd_device_identity(self):
         import ray
         return {'role': self.role, 'assigned': ray.get_gpu_ids(),
+                'node_id': ray.get_runtime_context().get_node_id(),
                 'current_device': torch.cuda.current_device(),
                 'visibility_unmasked': ray_noset_visible_devices()}
 
 
 class OPDReferenceWorker(AllocatedGPUWorker):
+    def __init__(self, config, role):
+        config = deepcopy(config)
+        with open_dict(config.actor):
+            config.actor.ulysses_sequence_parallel_size = 1
+        with open_dict(config.actor.fsdp_config):
+            config.actor.fsdp_config.fsdp_size = 1
+        super().__init__(config, role)
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
         super().init_model()
@@ -73,8 +81,10 @@ class OPDActorWorker(AllocatedGPUWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def calibrate_opd(self, data):
         """Measure real policy gradients without changing weights or Adam state."""
-        if self.world_size != 1 or self._is_offload_param or self._is_offload_optimizer:
-            raise ValueError('Calibration requires the configured single-GPU resident actor')
+        if self._is_offload_param or self._is_offload_optimizer:
+            raise ValueError('Calibration requires a resident actor')
+        if self.world_size != self.ulysses_sequence_parallel_size:
+            raise ValueError('Calibration broadcasts one full batch across a sequence-parallel group')
         if getattr(self.actor, 'grad_scaler', None) is not None:
             raise ValueError('Calibration does not modify a mixed-precision scaler')
         count = 4 * self.config.actor.ppo_mini_batch_size
@@ -97,7 +107,8 @@ class OPDActorWorker(AllocatedGPUWorker):
                                       ('teacher', data.batch['teacher_log_probs'] - data.batch['old_log_probs'])]:
                 probe = deepcopy(data)
                 probe.batch['advantages'] = advantages.detach().clone()
-                stats = self.actor.update_policy(probe)
+                with self.ulysses_sharding_manager:
+                    stats = self.actor.update_policy(probe)
                 output[name + '_gradient_norms'] = [float(v) for v in stats['actor/grad_norm']]
         finally:
             optimizer.step = original_step

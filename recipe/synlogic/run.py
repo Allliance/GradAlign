@@ -13,6 +13,23 @@ CONDITIONS = ('full-clean', 'noise50', 'noise30', 'noise10', 'small1-noise10', '
               'mixture-gradient-equal', 'mixture-gradalign', 'teacher-distillation', 'noise50-teacher-distillation')
 
 
+def configure_tracking(run):
+    """Read credentials locally in the logging process, including external Ray actors."""
+    for line in Path(os.environ['SYNLOGIC_WANDB_ENV']).read_text().splitlines():
+        line = line.strip().removeprefix('export ')
+        if line.startswith('WANDB_') and '=' in line:
+            key, value = line.split('=', 1)
+            parts = shlex.split(value)
+            if parts:
+                os.environ.setdefault(key, parts[0])
+    for key in ('WANDB_DIR', 'WANDB_CACHE_DIR', 'WANDB_CONFIG_DIR', 'WANDB_DATA_DIR'):
+        path = run / key.lower()
+        path.mkdir(exist_ok=True)
+        os.environ[key] = str(path)
+    metadata = json.loads((run / 'portable-provenance.json').read_text())
+    os.environ.update(WANDB_RUN_ID=metadata['wandb']['id'], WANDB_RESUME='allow', WANDB_INIT_TIMEOUT='90')
+
+
 def overrides(root, condition, framework, gpus):
     spec = importlib.util.spec_from_file_location('single_card', framework / 'tools/train_single_card.py')
     module = importlib.util.module_from_spec(spec)
@@ -57,11 +74,11 @@ def overrides(root, condition, framework, gpus):
     result += [key + '=' + value for key, value in replacements.items()]
     metadata = json.loads((root / 'runs' / condition / 'portable-provenance.json').read_text())
     if opd:
-        if gpus != 2:
-            raise ValueError('OPD protocol requires one student and one teacher-reference GPU')
+        if gpus not in (2, 3):
+            raise ValueError('OPD requires one or two student GPUs and one teacher-reference GPU')
         values_by_key = {v.split('=', 1)[0].lstrip('+'): i for i, v in enumerate(result)}
-        for key, value in {'trainer.n_gpus_per_node': '1',
-                           'actor_rollout_ref.actor.fsdp_config.fsdp_size': '1'}.items():
+        for key, value in {'trainer.n_gpus_per_node': str(gpus - 1),
+                           'actor_rollout_ref.actor.fsdp_config.fsdp_size': str(gpus - 1)}.items():
             result[values_by_key[key]] = key + '=' + value
         result += ['+opd.' + key + '=' + json.dumps(value) for key, value in metadata['opd'].items()]
         result += ['+actor_rollout_ref.ref.teacher_model_path=' + metadata['teacher_model_path']]
@@ -96,6 +113,7 @@ def main():
     parser.add_argument('--framework-code', type=Path, required=True)
     parser.add_argument('--condition', choices=CONDITIONS, required=True)
     parser.add_argument('--gpus', type=int, choices=range(1, 5), default=4)
+    parser.add_argument('--local-gpus', type=int)
     parser.add_argument('--resolve-only', action='store_true')
     args, extra = parser.parse_known_args()
     root, framework = args.root.resolve(), args.framework_code.resolve()
@@ -114,7 +132,8 @@ def main():
         if not (folder / 'validated.json').exists():
             raise ValueError('Recovery checkpoint has not been validated')
         settings += ['trainer.val_before_train=False']
-    elif args.condition in ('teacher-distillation', 'noise50-teacher-distillation'):
+    elif (args.condition in ('teacher-distillation', 'noise50-teacher-distillation')
+          and not json.loads((run / 'portable-provenance.json').read_text()).get('fresh_from_base', False)):
         metadata = json.loads((run / 'portable-provenance.json').read_text())
         source = Path(metadata['initial_checkpoint'])
         if not (source / 'validated.json').exists():
@@ -128,23 +147,14 @@ def main():
         sys.argv += ['--cfg', 'job', '--resolve']
     else:
         import torch
-        if torch.cuda.device_count() != args.gpus:
+        local_gpus = args.local_gpus or args.gpus
+        if torch.cuda.device_count() != local_gpus:
             raise ValueError('Visible GPU count differs from the authorized run allocation')
-        for device in range(args.gpus):
+        for device in range(local_gpus):
             free,total=torch.cuda.mem_get_info(device)
             if total-free > 1024**3:
                 raise ValueError('Assigned GPU has an unreconciled existing workload')
-        for line in Path(os.environ['SYNLOGIC_WANDB_ENV']).read_text().splitlines():
-            line = line.strip().removeprefix('export ')
-            if line.startswith('WANDB_') and '=' in line:
-                key, value = line.split('=', 1)
-                os.environ.setdefault(key, shlex.split(value)[0])
-        for key in ('WANDB_DIR', 'WANDB_CACHE_DIR', 'WANDB_CONFIG_DIR', 'WANDB_DATA_DIR'):
-            path = run / key.lower()
-            path.mkdir(exist_ok=True)
-            os.environ[key] = str(path)
-        metadata = json.loads((run / 'portable-provenance.json').read_text())
-        os.environ.update(WANDB_RUN_ID=metadata['wandb']['id'], WANDB_RESUME='allow', WANDB_INIT_TIMEOUT='90')
+        configure_tracking(run)
     os.chdir(framework)
     from synlogic.main import main as train
     train()

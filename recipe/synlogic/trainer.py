@@ -73,6 +73,10 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
                  'expected_model_layers': self.config.provenance.get('model_layers', 36),
                  'expected_model_parameters': self.config.provenance.get('model_parameters', None),
                  'optimizer_updates': self.global_steps * (self.config.data.train_batch_size // self.config.actor_rollout_ref.actor.ppo_mini_batch_size)}
+        state['data_fingerprint'] = self.config.provenance.data_fingerprint
+        if self.config.get('opd', {}).get('enabled', False):
+            state['initial_source_step'] = self.config.opd.get('source_step', 300)
+            state['teacher_fingerprint'] = self.config.opd.teacher_fingerprint
         path = folder / 'experiment_state.json'
         temporary = path.with_suffix('.tmp')
         temporary.write_text(json.dumps(state, indent=2) + '\n')
@@ -91,6 +95,15 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
                     or state['world_size'] != self.config.trainer.n_gpus_per_node
                     or (state.get('expected_model_parameters') is not None and state['expected_model_parameters'] != self.config.provenance.get('model_parameters'))):
                 raise ValueError('Incompatible full-state recovery checkpoint')
+            if state.get('data_fingerprint', self.config.provenance.data_fingerprint) != self.config.provenance.data_fingerprint:
+                raise ValueError('Checkpoint training-input fingerprint differs')
+            if self.config.get('opd', {}).get('enabled', False):
+                if (state.get('teacher_fingerprint', self.config.opd.teacher_fingerprint) != self.config.opd.teacher_fingerprint
+                        or state.get('initial_source_step', self.config.opd.get('source_step', 300)) != self.config.opd.get('source_step', 300)):
+                    raise ValueError('Checkpoint distillation source differs')
+                if self.config.opd.get('source_step', 300) == 0 and not all(
+                        key in state for key in ('data_fingerprint', 'teacher_fingerprint', 'initial_source_step')):
+                    raise ValueError('Base-start recovery requires frozen data and teacher provenance')
         return result
 
     def _validate(self):

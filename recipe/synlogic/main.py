@@ -9,23 +9,48 @@ from omegaconf import OmegaConf
 import ray
 
 
+def runtime_env_vars():
+    # Credentials are read by the logging actor from its existing private file;
+    # putting API keys in Ray runtime_env would serialize them into Ray state.
+    allowed = ('SYNLOGIC_FRAMEWORK_CODE', 'SYNLOGIC_RUN_ROOT', 'SYNLOGIC_WANDB_ENV',
+               'SYNLOGIC_ALLOCATION_ID', 'SYNLOGIC_ATTEMPT', 'SYNLOGIC_LEASE_DRAIN_EPOCH',
+               'SYNLOGIC_SUITE_ROOT', 'WANDB_TAGS', 'PYTHONPATH')
+    return {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN', 'VLLM_LOGGING_LEVEL': 'WARN',
+            **{key: os.environ[key] for key in allowed if key in os.environ}}
+
+
 @hydra.main(config_path=str(Path(os.environ['SYNLOGIC_FRAMEWORK_CODE']) / 'src/config'),
             config_name='dapo_trainer', version_base=None)
 def main(config):
-    gpus = 2 if config.get('opd', {}).get('enabled', False) else config.trainer.n_gpus_per_node
+    gpus = (config.trainer.n_gpus_per_node + 1
+            if config.get('opd', {}).get('enabled', False) else config.trainer.n_gpus_per_node)
     # Full-gradient selection broadcasts several copies of a 16-response batch.
     # Keep these objects in shared memory instead of spilling to local disk.
     object_store_gib = 48 if config.mixture.condition == 'mixture-gradalign' else 8
-    ray.init(num_cpus=config.ray_init.num_cpus, num_gpus=gpus, include_dashboard=False,
+    init = dict(num_cpus=config.ray_init.num_cpus, num_gpus=gpus, include_dashboard=False,
              object_store_memory=object_store_gib * 1024**3, _temp_dir='/run/synlogic-cache/ray',
-             runtime_env={'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN',
-                                       'VLLM_LOGGING_LEVEL': 'WARN'}})
-    ray.get(TaskRunner.remote().run.remote(config))
+             runtime_env={'env_vars': runtime_env_vars()})
+    if os.environ.get('SYNLOGIC_RAY_ADDRESS'):
+        init = dict(address=os.environ['SYNLOGIC_RAY_ADDRESS'],
+                    runtime_env=init['runtime_env'])
+        if os.environ.get('MY_HOST_IP'):
+            init['_node_ip_address'] = os.environ['MY_HOST_IP']
+    ray.init(**init)
+    if config.get('opd', {}).get('enabled', False):
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+        runner = TaskRunner.options(scheduling_strategy=NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(), soft=False)).remote()
+    else:
+        runner = TaskRunner.remote()
+    ray.get(runner.run.remote(config))
 
 
 @ray.remote(num_cpus=1)
 class TaskRunner:
     def run(self, config):
+        if config.get('opd', {}).get('enabled', False):
+            from .run import configure_tracking
+            configure_tracking(Path(config.mixture.root)/'runs'/config.mixture.condition)
         from verl.utils import hf_tokenizer
         from verl.workers.fsdp_workers import ActorRolloutRefWorker
         from verl.single_controller.ray import RayWorkerGroup
@@ -50,7 +75,8 @@ class TaskRunner:
                        if config.mixture.condition == 'mixture-gradalign' else ActorRolloutRefWorker)
         roles = {Role.ActorRollout: ray.remote(actor_class),
                  Role.RefPolicy: ray.remote(OPDReferenceWorker if opd_enabled else ActorRolloutRefWorker)}
-        pools = {'student': [1], 'teacher_reference': [1]} if opd_enabled else {'training': [config.trainer.n_gpus_per_node]}
+        pools = ({'student': [config.trainer.n_gpus_per_node], 'teacher_reference': [1]}
+                 if opd_enabled else {'training': [config.trainer.n_gpus_per_node]})
         mapping = ({Role.ActorRollout: 'student', Role.RefPolicy: 'teacher_reference'} if opd_enabled
                    else {role: 'training' for role in roles})
         manager = ResourcePoolManager(resource_pool_spec=pools, mapping=mapping)
