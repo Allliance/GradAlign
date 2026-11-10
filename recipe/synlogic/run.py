@@ -9,7 +9,7 @@ from pathlib import Path
 import shlex
 import sys
 
-CONDITIONS = ('full-clean', 'noise50', 'noise30', 'noise10', 'small1-noise10', 'mixture-sampling99',
+CONDITIONS = ('idn50', 'full-clean', 'noise50', 'noise30', 'noise10', 'small1-noise10', 'mixture-sampling99',
               'mixture-gradient-equal', 'mixture-gradalign')
 
 

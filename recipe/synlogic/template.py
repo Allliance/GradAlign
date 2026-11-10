@@ -1,19 +1,14 @@
-"""Verify the released base-model prompt without injecting a thinking prefix."""
-
+"""Verify the Base prompt while explicitly disabling thinking."""
 import hashlib
-
-PINNED_TEMPLATE_SHA256 = "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5"
-PROMPT_PROTOCOL = "qwen3-base-default-v1"
-
-
+PINNED_TEMPLATE_SHA256 = "17762d2e5131cb2a950db7dd5700c50095547773d3302b52baebe9ae32257a55"
+PROMPT_PROTOCOL = "qwen3-base-chatml-thinking-disabled-v1"
 def verify_base_template(tokenizer):
     if hashlib.sha256(tokenizer.chat_template.encode()).hexdigest() != PINNED_TEMPLATE_SHA256:
-        raise ValueError("The pinned base-model template was modified")
+        raise ValueError("The pinned Base prompt adapter was modified")
     messages = [{"role": "user", "content": "Template verification."}]
-    # This call deliberately matches RLHFDataset: the base template has no thinking prefix.
-    actual = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    explicit = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
-                                             enable_thinking=True)
-    if actual != explicit or not actual.endswith("<|im_start|>assistant\n"):
-        raise ValueError("The dataloader must use the base model's unmodified default template")
+    actual = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
+                                           enable_thinking=False)
+    expected = "<|im_start|>user\nTemplate verification.<|im_end|>\n<|im_start|>assistant\n"
+    if actual != expected:
+        raise ValueError("The Base prompt must preserve bare-assistant bytes with thinking disabled")
     return tokenizer
