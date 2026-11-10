@@ -1,7 +1,9 @@
 """SynLogic validation and reproducible dataset-size/noise baselines."""
 
 import json
+import os
 from pathlib import Path
+from omegaconf import OmegaConf
 
 import torch
 
@@ -73,6 +75,12 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
                  'expected_model_layers': self.config.provenance.get('model_layers', 36),
                  'expected_model_parameters': self.config.provenance.get('model_parameters', None),
                  'optimizer_updates': self.global_steps * (self.config.data.train_batch_size // self.config.actor_rollout_ref.actor.ppo_mini_batch_size)}
+        state.update(data_fingerprint=self.config.provenance.data_fingerprint,
+                     model_revision=self.config.provenance.model_revision,
+                     source_revision=OmegaConf.to_container(self.config.provenance.source_revision, resolve=True)
+                     if OmegaConf.is_config(self.config.provenance.source_revision) else self.config.provenance.source_revision,
+                     allocation_id=os.environ.get('SYNLOGIC_ALLOCATION_ID'),
+                     attempt=int(os.environ.get('SYNLOGIC_ATTEMPT', '1')))
         path = folder / 'experiment_state.json'
         temporary = path.with_suffix('.tmp')
         temporary.write_text(json.dumps(state, indent=2) + '\n')
@@ -87,6 +95,8 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
             if (state['step'] != self.global_steps or state['protocol_id'] != self.config.provenance.protocol_id
                     or state['prompt_template_sha256'] != self.config.provenance.prompt_template_sha256
                     or state['world_size'] != self.config.trainer.n_gpus_per_node
+                    or (state.get('data_fingerprint') is not None and state['data_fingerprint'] != self.config.provenance.data_fingerprint)
+                    or (state.get('model_revision') is not None and state['model_revision'] != self.config.provenance.model_revision)
                     or (state.get('expected_model_parameters') is not None and state['expected_model_parameters'] != self.config.provenance.get('model_parameters'))):
                 raise ValueError('Incompatible full-state recovery checkpoint')
         return result
