@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import sys
@@ -55,6 +56,13 @@ def overrides(root, condition, framework, gpus):
             result.append(value)
     result += [key + '=' + value for key, value in replacements.items()]
     metadata = json.loads((root / 'runs' / condition / 'portable-provenance.json').read_text())
+    revision = metadata['source_revision']
+    if isinstance(revision, dict):
+        if not all(re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key) for key in revision):
+            raise ValueError('Source revision keys must be Hydra identifiers')
+        revision_override = '{' + ','.join(key + ':' + json.dumps(value) for key, value in revision.items()) + '}'
+    else:
+        revision_override = json.dumps(revision)
     result = [v if not v.startswith('trainer.experiment_name=') else 'trainer.experiment_name=' + metadata.get('experiment_name', v.split('=', 1)[1]) for v in result]
     if hashlib.sha256((root / 'data/prepared' / (dataset + '.parquet')).read_bytes()).hexdigest() != metadata['data_fingerprint']:
         raise ValueError('Training parquet fingerprint differs from frozen provenance')
@@ -67,7 +75,7 @@ def overrides(root, condition, framework, gpus):
                '+provenance.prompt_template_sha256=' + metadata['prompt_template_sha256'],
                '+provenance.model_revision=' + metadata['model_revision'],
                '+provenance.data_fingerprint=' + metadata['data_fingerprint'],
-               '+provenance.source_revision=' + json.dumps(metadata['source_revision'])]
+               '+provenance.source_revision=' + revision_override]
     if metadata.get('expected_model_parameters'):
         result += ['+provenance.model_layers=' + str(metadata['expected_model_layers']),
                    '+provenance.model_parameters=' + str(metadata['expected_model_parameters'])]
