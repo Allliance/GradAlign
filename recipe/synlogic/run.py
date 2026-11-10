@@ -10,7 +10,7 @@ import shlex
 import sys
 
 CONDITIONS = ('full-clean', 'noise50', 'noise30', 'noise10', 'small1-noise10', 'mixture-sampling99',
-              'mixture-gradient-equal', 'mixture-gradalign')
+              'mixture-gradient-equal', 'mixture-gradalign', 'noisy-to-clean')
 
 
 def overrides(root, condition, framework, gpus):
@@ -67,7 +67,7 @@ def overrides(root, condition, framework, gpus):
                '+provenance.prompt_template_sha256=' + metadata['prompt_template_sha256'],
                '+provenance.model_revision=' + metadata['model_revision'],
                '+provenance.data_fingerprint=' + metadata['data_fingerprint'],
-               '+provenance.source_revision=' + json.dumps(metadata['source_revision'])]
+               '+provenance.source_revision=' + json.dumps(json.dumps(metadata['source_revision'], sort_keys=True) if isinstance(metadata['source_revision'], dict) else metadata['source_revision'])]
     if metadata.get('expected_model_parameters'):
         result += ['+provenance.model_layers=' + str(metadata['expected_model_layers']),
                    '+provenance.model_parameters=' + str(metadata['expected_model_parameters'])]
@@ -75,6 +75,11 @@ def overrides(root, condition, framework, gpus):
         result += ['+gradalign.selection_interval=10', '+gradalign.selection_ratio=4',
                    '+gradalign.reference_rollouts=16', '+gradalign.candidate_rollouts=16',
                    '+gradalign.candidate_chunk=64']
+    if condition == "noisy-to-clean":
+        result = [v if not v.startswith("trainer.total_training_steps=") else
+                  "trainer.total_training_steps=" + str(metadata["target_updates"]) for v in result]
+        result += ["+curriculum." + key + "=" + json.dumps(value)
+                   for key, value in metadata["curriculum"].items()]
     return result
 
 
@@ -88,7 +93,7 @@ def main():
     args, extra = parser.parse_known_args()
     root, framework = args.root.resolve(), args.framework_code.resolve()
     run = root / 'runs' / args.condition
-    if (root / 'STOP').exists() or (run / 'STOP').exists():
+    if (Path(os.environ.get('SYNLOGIC_SUITE_ROOT', str(root))) / 'STOP').exists() or (root / 'STOP').exists() or (run / 'STOP').exists():
         raise SystemExit('User STOP is latched')
     paths = [str(Path(__file__).resolve().parents[1]), str(framework), str(framework / 'SynLogic')]
     sys.path[:0] = paths

@@ -104,7 +104,7 @@ def main():
         require(optimizer['state'] and optimizer['param_groups'], 'Missing Adam state')
         counters = [float(item['step']) for item in optimizer['state'].values() if 'step' in item]
         expected = state.get('optimizer_updates', step)
-        require(counters and all(counter >= expected for counter in counters), 'Old optimizer counters')
+        require(counters and all(counter == expected if state['condition'] == 'noisy-to-clean' else counter >= expected for counter in counters), 'Wrong optimizer counters')
         require(all(math.isfinite(group['lr']) and group['lr'] > 0 for group in optimizer['param_groups']), 'Invalid learning rate')
         finite(optimizer)
         del optimizer
@@ -118,9 +118,26 @@ def main():
             f'Incomplete model parameter count: {parameters}; expected {expected_parameters}')
     if rank == 0:
         loader = torch.load(folder/'data.pt',map_location='cpu',weights_only=False)
-        require('synlogic_plan_generator' in loader and 'synlogic_plan_shape' in loader, 'Missing sampler state')
+        if state["condition"] == "noisy-to-clean":
+            from curriculum import CurriculumDataLoader
+            from types import SimpleNamespace
+            import pyarrow.parquet as pq
+            run = folder.parent.parent
+            metadata = json.loads((run/"portable-provenance.json").read_text())
+            rows = pq.read_table(run.parent.parent/"data/prepared/noisy-to-clean.parquet").to_pylist()
+            class Frame:
+                def to_list(self): return rows
+            original = SimpleNamespace(dataset=SimpleNamespace(dataframe=Frame()),
+                                       batch_size=160, num_workers=0, drop_last=True, collate_fn=None)
+            restored = CurriculumDataLoader(original, **metadata["curriculum"])
+            restored.load_state_dict(loader)
+            require(restored.position == state["step"] - metadata["curriculum"]["parent_step"], "Curriculum cursor mismatch")
+        else:
+            require('synlogic_plan_generator' in loader and 'synlogic_plan_shape' in loader, 'Missing sampler state')
         result = {**state,'validated':True,'model_parameters':parameters,
                   'minimum_optimizer_counter':min(counters),
+                  'optimizer_steps':state['optimizer_updates'],
+                  'all_model_optimizer_tensors_finite':True,
                   'tied_embeddings_verified':model_config.get('tie_word_embeddings', False),
                   'components':['all_model_shards','all_optimizer_shards','all_scheduler_and_rng_shards',
                                 'dataloader','sampler_generator_and_index_plan','experiment_state']}

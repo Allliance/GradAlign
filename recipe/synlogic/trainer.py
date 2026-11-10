@@ -8,6 +8,7 @@ import torch
 from src.dapo_ray_trainer import RayDAPOTrainer
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from .sampling import PlanDataLoader, PlanSampler
+from .curriculum import CurriculumMixin
 from .alignment import AlignmentLoader, AlignmentMixin
 
 
@@ -63,6 +64,9 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
             self.train_dataloader = PlanDataLoader(dataset=train_dataset, batch_size=original.batch_size,
                                                  num_workers=0, drop_last=True,
                                                  collate_fn=original.collate_fn, sampler=sampler)
+
+    def _observe_training_batch(self, batch, metrics):
+        pass
 
     def _save_checkpoint(self):
         folder = Path(self.config.trainer.default_local_dir) / f'global_step_{self.global_steps}'
@@ -132,3 +136,8 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
             return super().fit()
         finally:
             tracking.Tracking = original
+
+
+class SynLogicCurriculumTrainer(CurriculumMixin, SynLogicTrainer):
+    # This framework already saves the first actual update after recovery.
+    save_first_update = False

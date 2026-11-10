@@ -31,7 +31,7 @@ class TaskRunner:
         from verl.single_controller.ray import RayWorkerGroup
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager, Role
         from src.syn_logic_reward import SynLogicRewardManager
-        from .trainer import SynLogicTrainer
+        from .trainer import SynLogicTrainer, SynLogicCurriculumTrainer
         from .template import verify_base_template
         from .alignment_worker import AlignmentWorker
 
@@ -45,7 +45,8 @@ class TaskRunner:
         reward_args = dict(tokenizer=tokenizer, num_examine=0, reward_fn_key=config.data.reward_fn_key,
                            max_resp_len=config.data.max_response_length,
                            overlong_buffer_cfg=deepcopy(config.reward_model.overlong_buffer))
-        trainer = SynLogicTrainer(config=config, tokenizer=tokenizer, processor=None,
+        trainer_type = SynLogicCurriculumTrainer if config.get("curriculum") is not None else SynLogicTrainer
+        trainer = trainer_type(config=config, tokenizer=tokenizer, processor=None,
             role_worker_mapping=roles, resource_pool_manager=manager, ray_worker_group_cls=RayWorkerGroup,
             reward_fn=SynLogicRewardManager(syn_logic_score_type='acc_without_think_format', **reward_args),
             val_reward_fn=SynLogicRewardManager(syn_logic_score_type='validation_acc', **reward_args),
