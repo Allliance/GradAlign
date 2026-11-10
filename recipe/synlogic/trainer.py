@@ -83,6 +83,8 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
         result = super()._load_checkpoint()
         if self.global_steps:
             folder = Path(self.config.trainer.default_local_dir) / f'global_step_{self.global_steps}'
+            if self.config.trainer.resume_mode == 'resume_path':
+                folder = Path(self.config.trainer.resume_from_path)
             state = json.loads((folder / 'experiment_state.json').read_text())
             if (state['step'] != self.global_steps or state['protocol_id'] != self.config.provenance.protocol_id
                     or state['prompt_template_sha256'] != self.config.provenance.prompt_template_sha256

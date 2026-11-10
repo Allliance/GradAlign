@@ -12,7 +12,7 @@ import ray
 @hydra.main(config_path=str(Path(os.environ['SYNLOGIC_FRAMEWORK_CODE']) / 'src/config'),
             config_name='dapo_trainer', version_base=None)
 def main(config):
-    gpus = config.trainer.n_gpus_per_node
+    gpus = 2 if config.get('opd', {}).get('enabled', False) else config.trainer.n_gpus_per_node
     # Full-gradient selection broadcasts several copies of a 16-response batch.
     # Keep these objects in shared memory instead of spilling to local disk.
     object_store_gib = 48 if config.mixture.condition == 'mixture-gradalign' else 8
@@ -37,15 +37,28 @@ class TaskRunner:
 
         OmegaConf.resolve(config)
         tokenizer = verify_base_template(hf_tokenizer(config.actor_rollout_ref.model.path))
-        actor_class = AlignmentWorker if config.mixture.condition == 'mixture-gradalign' else ActorRolloutRefWorker
+        opd_enabled = config.get('opd', {}).get('enabled', False)
+        if opd_enabled:
+            from .opd_worker import OPDActorWorker, OPDReferenceWorker
+            from .opd_trainer import OPDTrainer
+            from src.train_eval_guard import check_resolved_inputs
+            guard = check_resolved_inputs(
+                config.data.train_files, config.data.val_files, config.provenance.data_fingerprint,
+                config.opd.exclusions_file, config.opd.additional_questions_file)
+            print('Resolved training input guard:', guard, flush=True)
+        actor_class = (OPDActorWorker if opd_enabled else AlignmentWorker
+                       if config.mixture.condition == 'mixture-gradalign' else ActorRolloutRefWorker)
         roles = {Role.ActorRollout: ray.remote(actor_class),
-                 Role.RefPolicy: ray.remote(ActorRolloutRefWorker)}
-        manager = ResourcePoolManager(resource_pool_spec={'training': [config.trainer.n_gpus_per_node]},
-                                      mapping={role: 'training' for role in roles})
+                 Role.RefPolicy: ray.remote(OPDReferenceWorker if opd_enabled else ActorRolloutRefWorker)}
+        pools = {'student': [1], 'teacher_reference': [1]} if opd_enabled else {'training': [config.trainer.n_gpus_per_node]}
+        mapping = ({Role.ActorRollout: 'student', Role.RefPolicy: 'teacher_reference'} if opd_enabled
+                   else {role: 'training' for role in roles})
+        manager = ResourcePoolManager(resource_pool_spec=pools, mapping=mapping)
         reward_args = dict(tokenizer=tokenizer, num_examine=0, reward_fn_key=config.data.reward_fn_key,
                            max_resp_len=config.data.max_response_length,
                            overlong_buffer_cfg=deepcopy(config.reward_model.overlong_buffer))
-        trainer = SynLogicTrainer(config=config, tokenizer=tokenizer, processor=None,
+        trainer_class = OPDTrainer if opd_enabled else SynLogicTrainer
+        trainer = trainer_class(config=config, tokenizer=tokenizer, processor=None,
             role_worker_mapping=roles, resource_pool_manager=manager, ray_worker_group_cls=RayWorkerGroup,
             reward_fn=SynLogicRewardManager(syn_logic_score_type='acc_without_think_format', **reward_args),
             val_reward_fn=SynLogicRewardManager(syn_logic_score_type='validation_acc', **reward_args),

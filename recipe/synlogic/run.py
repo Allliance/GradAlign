@@ -10,7 +10,7 @@ import shlex
 import sys
 
 CONDITIONS = ('full-clean', 'noise50', 'noise30', 'noise10', 'small1-noise10', 'mixture-sampling99',
-              'mixture-gradient-equal', 'mixture-gradalign')
+              'mixture-gradient-equal', 'mixture-gradalign', 'teacher-distillation', 'noise50-teacher-distillation')
 
 
 def overrides(root, condition, framework, gpus):
@@ -18,7 +18,8 @@ def overrides(root, condition, framework, gpus):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     values = module.overrides(root, 'full-clean')
-    dataset = condition if not condition.startswith('mixture-') else 'mixture'
+    opd = condition in ('teacher-distillation', 'noise50-teacher-distillation')
+    dataset = 'noise50' if opd else condition if not condition.startswith('mixture-') else 'mixture'
     replacements = {
         'data.train_files': str(root / 'data/prepared' / f'{dataset}.parquet'),
         'data.train_batch_size': '160', 'data.gen_batch_size': '160',
@@ -55,6 +56,17 @@ def overrides(root, condition, framework, gpus):
             result.append(value)
     result += [key + '=' + value for key, value in replacements.items()]
     metadata = json.loads((root / 'runs' / condition / 'portable-provenance.json').read_text())
+    if opd:
+        if gpus != 2:
+            raise ValueError('OPD protocol requires one student and one teacher-reference GPU')
+        values_by_key = {v.split('=', 1)[0].lstrip('+'): i for i, v in enumerate(result)}
+        for key, value in {'trainer.n_gpus_per_node': '1',
+                           'actor_rollout_ref.actor.fsdp_config.fsdp_size': '1'}.items():
+            result[values_by_key[key]] = key + '=' + value
+        result += ['+opd.' + key + '=' + json.dumps(value) for key, value in metadata['opd'].items()]
+        result += ['+actor_rollout_ref.ref.teacher_model_path=' + metadata['teacher_model_path']]
+        result += ['+data.apply_chat_template_kwargs.enable_thinking=False']
+        result += ['+data.base_generation_prompt=True']
     result = [v if not v.startswith('trainer.experiment_name=') else 'trainer.experiment_name=' + metadata.get('experiment_name', v.split('=', 1)[1]) for v in result]
     if hashlib.sha256((root / 'data/prepared' / (dataset + '.parquet')).read_bytes()).hexdigest() != metadata['data_fingerprint']:
         raise ValueError('Training parquet fingerprint differs from frozen provenance')
@@ -102,6 +114,13 @@ def main():
         if not (folder / 'validated.json').exists():
             raise ValueError('Recovery checkpoint has not been validated')
         settings += ['trainer.val_before_train=False']
+    elif args.condition in ('teacher-distillation', 'noise50-teacher-distillation'):
+        metadata = json.loads((run / 'portable-provenance.json').read_text())
+        source = Path(metadata['initial_checkpoint'])
+        if not (source / 'validated.json').exists():
+            raise ValueError('Initial fork checkpoint has not been validated')
+        settings += ['trainer.resume_mode=resume_path', 'trainer.resume_from_path=' + str(source),
+                     'trainer.val_before_train=False']
     run.mkdir(parents=True, exist_ok=True)
     (run / 'overrides.json').write_text(json.dumps(settings, indent=2) + '\n')
     sys.argv = [str(Path(__file__).with_name('main.py')), *settings]

@@ -11,9 +11,9 @@ def verify_base_template(tokenizer):
         raise ValueError("The pinned base-model template was modified")
     messages = [{"role": "user", "content": "Template verification."}]
     # This call deliberately matches RLHFDataset: the base template has no thinking prefix.
-    actual = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    explicit = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
-                                             enable_thinking=True)
+    actual = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False,
+                                           enable_thinking=False) + '<|im_start|>assistant\n'
+    explicit = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     if actual != explicit or not actual.endswith("<|im_start|>assistant\n"):
         raise ValueError("The dataloader must use the base model's unmodified default template")
     return tokenizer
