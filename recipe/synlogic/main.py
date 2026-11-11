@@ -66,11 +66,10 @@ class TaskRunner:
         if opd_enabled:
             from .opd_worker import OPDActorWorker, OPDReferenceWorker
             from .opd_trainer import OPDTrainer
-            from src.train_eval_guard import check_resolved_inputs
-            guard = check_resolved_inputs(
-                config.data.train_files, config.data.val_files, config.provenance.data_fingerprint,
-                config.opd.exclusions_file, config.opd.additional_questions_file)
-            print('Resolved training input guard:', guard, flush=True)
+            from .input_contract import verify_contract
+            guard = verify_contract(config.provenance.input_contract,
+                                    config.data.train_files, config.data.val_files)
+            print('Shared input contract verified:', config.provenance.input_contract.sha256, guard['training_rows'], flush=True)
         actor_class = (OPDActorWorker if opd_enabled else AlignmentWorker
                        if config.mixture.condition == 'mixture-gradalign' else ActorRolloutRefWorker)
         roles = {Role.ActorRollout: ray.remote(actor_class),

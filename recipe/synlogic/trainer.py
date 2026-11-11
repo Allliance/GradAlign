@@ -51,6 +51,13 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
         from verl.trainer.main_ppo import create_rl_dataset
         if train_dataset is None:
             train_dataset = create_rl_dataset(self.config.data.train_files, self.config.data, self.tokenizer, self.processor)
+        if self.config.get('opd', {}).get('enabled', False):
+            from .input_contract import verify_contract
+            contract = verify_contract(self.config.provenance.input_contract,
+                                       self.config.data.train_files, self.config.data.val_files)
+            ids = [int(v['index']) for v in train_dataset.dataframe['extra_info']]
+            if ids != contract['source_ids']:
+                raise ValueError('Actual loaded training rows differ from the shared input contract')
         sampler = PlanSampler(train_dataset, self.config.mixture.condition,
                               seed=self.config.data.seed, batch_size=self.config.data.train_batch_size,
                               batches_per_pass=self.config.mixture.get("batches_per_pass", 97))
@@ -74,6 +81,8 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
                  'expected_model_parameters': self.config.provenance.get('model_parameters', None),
                  'optimizer_updates': self.global_steps * (self.config.data.train_batch_size // self.config.actor_rollout_ref.actor.ppo_mini_batch_size)}
         state['data_fingerprint'] = self.config.provenance.data_fingerprint
+        if self.config.provenance.get('input_contract'):
+            state['input_contract_sha256'] = self.config.provenance.input_contract.sha256
         if self.config.get('opd', {}).get('enabled', False):
             state['initial_source_step'] = self.config.opd.get('source_step', 300)
             state['teacher_fingerprint'] = self.config.opd.teacher_fingerprint

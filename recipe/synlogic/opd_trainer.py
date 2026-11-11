@@ -57,7 +57,15 @@ class OPDTrainer(SynLogicTrainer):
             temporary.write_text(json.dumps(result, indent=2) + '\n')
             temporary.replace(path)
         proof = json.loads(path.read_text())
-        if (proof['training_sha256'] != self.config.provenance.data_fingerprint
+        inherited = settings.get('historical_fixed_coefficient', None)
+        if inherited:
+            if (settings.calibrate or hashlib.sha256(path.read_bytes()).hexdigest() != inherited.file_sha256
+                    or proof['teacher_coefficient'] != inherited.coefficient
+                    or proof['teacher_fingerprint'] != settings.teacher_fingerprint
+                    or proof['source_step'] != settings.get('source_step', 300)):
+                raise ValueError('Frozen historical coefficient provenance mismatch')
+            metrics['opd/historical_fixed_coefficient'] = 1
+        elif (proof['training_sha256'] != self.config.provenance.data_fingerprint
                 or proof['teacher_fingerprint'] != settings.teacher_fingerprint
                 or proof['source_step'] != settings.get('source_step', 300)):
             raise ValueError('Calibration provenance mismatch')

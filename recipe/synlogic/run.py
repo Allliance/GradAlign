@@ -13,6 +13,16 @@ CONDITIONS = ('full-clean', 'noise50', 'noise30', 'noise10', 'small1-noise10', '
               'mixture-gradient-equal', 'mixture-gradalign', 'teacher-distillation', 'noise50-teacher-distillation')
 
 
+def override_value(value):
+    if isinstance(value, dict):
+        if any(not key.replace('_', '').isalnum() for key in value):
+            raise ValueError('Unsupported configuration dictionary key')
+        return '{' + ','.join(key + ':' + override_value(item) for key, item in value.items()) + '}'
+    if isinstance(value, list):
+        return '[' + ','.join(override_value(item) for item in value) + ']'
+    return json.dumps(value)
+
+
 def configure_tracking(run):
     """Read credentials locally in the logging process, including external Ray actors."""
     for line in Path(os.environ['SYNLOGIC_WANDB_ENV']).read_text().splitlines():
@@ -80,13 +90,18 @@ def overrides(root, condition, framework, gpus):
         for key, value in {'trainer.n_gpus_per_node': str(gpus - 1),
                            'actor_rollout_ref.actor.fsdp_config.fsdp_size': str(gpus - 1)}.items():
             result[values_by_key[key]] = key + '=' + value
-        result += ['+opd.' + key + '=' + json.dumps(value) for key, value in metadata['opd'].items()]
+        result += ['+opd.' + key + '=' + override_value(value) for key, value in metadata['opd'].items()]
         result += ['+actor_rollout_ref.ref.teacher_model_path=' + metadata['teacher_model_path']]
         result += ['+data.apply_chat_template_kwargs.enable_thinking=False']
         result += ['+data.base_generation_prompt=True']
     result = [v if not v.startswith('trainer.experiment_name=') else 'trainer.experiment_name=' + metadata.get('experiment_name', v.split('=', 1)[1]) for v in result]
     if hashlib.sha256((root / 'data/prepared' / (dataset + '.parquet')).read_bytes()).hexdigest() != metadata['data_fingerprint']:
         raise ValueError('Training parquet fingerprint differs from frozen provenance')
+    if opd:
+        from synlogic.input_contract import verify_contract
+        binding = metadata.get('input_contract')
+        verify_contract(binding, root / 'data/prepared' / (dataset + '.parquet'), root / 'data/prepared/validation.parquet')
+        result += ['+provenance.input_contract=' + override_value(binding)]
     result += ['+trainer.rollout_snapshot_dir=' + str(root / 'runs' / condition / 'rollout_snapshots'),
                'actor_rollout_ref.actor.kl_loss_type=low_var_kl',
                'actor_rollout_ref.rollout.do_sample=True',
