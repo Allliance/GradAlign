@@ -2,6 +2,7 @@
 import gzip
 import hashlib
 import json
+import math
 from pathlib import Path
 
 
@@ -37,6 +38,22 @@ def verify_contract(binding, training_files, validation_files):
     if ids != contract['source_ids'] or len(ids) != contract['training_rows'] or len(set(ids)) != len(ids):
         raise ValueError('Input audit row identities differ')
     return contract
+
+
+def verify_fixed_coefficient(settings):
+    """Reject stale calibration flags and changed provenance before GPU startup."""
+    inherited = settings.get('historical_fixed_coefficient')
+    if not inherited:
+        return
+    path = Path(settings['calibration_file'])
+    if settings.get('calibrate') or sha256(path) != inherited['file_sha256']:
+        raise ValueError('Frozen coefficient requires calibrate=false and its unchanged source file')
+    proof = json.loads(path.read_text())
+    if (proof['teacher_coefficient'] != inherited['coefficient']
+            or not math.isfinite(proof['teacher_coefficient']) or proof['teacher_coefficient'] <= 0
+            or proof['teacher_fingerprint'] != settings['teacher_fingerprint']
+            or proof['source_step'] != settings.get('source_step', 300)):
+        raise ValueError('Frozen coefficient application provenance mismatch')
 
 
 def migrate_plan_state(state, old_source_ids, new_source_ids, batches_per_pass):

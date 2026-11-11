@@ -98,7 +98,8 @@ def overrides(root, condition, framework, gpus):
     if hashlib.sha256((root / 'data/prepared' / (dataset + '.parquet')).read_bytes()).hexdigest() != metadata['data_fingerprint']:
         raise ValueError('Training parquet fingerprint differs from frozen provenance')
     if opd:
-        from synlogic.input_contract import verify_contract
+        from synlogic.input_contract import verify_contract, verify_fixed_coefficient
+        verify_fixed_coefficient(metadata['opd'])
         binding = metadata.get('input_contract')
         verify_contract(binding, root / 'data/prepared' / (dataset + '.parquet'), root / 'data/prepared/validation.parquet')
         result += ['+provenance.input_contract=' + override_value(binding)]
