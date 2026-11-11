@@ -97,12 +97,12 @@ def overrides(root, condition, framework, gpus):
     result = [v if not v.startswith('trainer.experiment_name=') else 'trainer.experiment_name=' + metadata.get('experiment_name', v.split('=', 1)[1]) for v in result]
     if hashlib.sha256((root / 'data/prepared' / (dataset + '.parquet')).read_bytes()).hexdigest() != metadata['data_fingerprint']:
         raise ValueError('Training parquet fingerprint differs from frozen provenance')
+    from synlogic.input_contract import verify_contract, verify_fixed_coefficient
     if opd:
-        from synlogic.input_contract import verify_contract, verify_fixed_coefficient
         verify_fixed_coefficient(metadata['opd'])
-        binding = metadata.get('input_contract')
-        verify_contract(binding, root / 'data/prepared' / (dataset + '.parquet'), root / 'data/prepared/validation.parquet')
-        result += ['+provenance.input_contract=' + override_value(binding)]
+    binding = metadata.get('input_contract')
+    verify_contract(binding, root / 'data/prepared' / (dataset + '.parquet'), root / 'data/prepared/validation.parquet')
+    result += ['+provenance.input_contract=' + override_value(binding)]
     result += ['+trainer.rollout_snapshot_dir=' + str(root / 'runs' / condition / 'rollout_snapshots'),
                'actor_rollout_ref.actor.kl_loss_type=low_var_kl',
                'actor_rollout_ref.rollout.do_sample=True',
