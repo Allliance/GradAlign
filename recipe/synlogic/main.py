@@ -63,6 +63,7 @@ class TaskRunner:
         OmegaConf.resolve(config)
         tokenizer = verify_base_template(hf_tokenizer(config.actor_rollout_ref.model.path))
         opd_enabled = config.get('opd', {}).get('enabled', False)
+        from .clean_rlvr_worker import CleanRLVRReferenceWorker
         from .input_contract import verify_contract
         guard = verify_contract(config.provenance.input_contract,
                                 config.data.train_files, config.data.val_files)
@@ -73,7 +74,8 @@ class TaskRunner:
         actor_class = (OPDActorWorker if opd_enabled else AlignmentWorker
                        if config.mixture.condition == 'mixture-gradalign' else ActorRolloutRefWorker)
         roles = {Role.ActorRollout: ray.remote(actor_class),
-                 Role.RefPolicy: ray.remote(OPDReferenceWorker if opd_enabled else ActorRolloutRefWorker)}
+                 Role.RefPolicy: ray.remote(OPDReferenceWorker if opd_enabled else CleanRLVRReferenceWorker
+                     if config.actor_rollout_ref.ref.get('initial_base_model_path') else ActorRolloutRefWorker)}
         pools = ({'student': [config.trainer.n_gpus_per_node], 'teacher_reference': [1]}
                  if opd_enabled else {'training': [config.trainer.n_gpus_per_node]})
         mapping = ({Role.ActorRollout: 'student', Role.RefPolicy: 'teacher_reference'} if opd_enabled

@@ -70,6 +70,16 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
                                                  num_workers=0, drop_last=True,
                                                  collate_fn=original.collate_fn, sampler=sampler)
 
+    def _actor_update_batch(self, batch):
+        if not self.config.mixture.get('preserve_global_minibatches', False):
+            return super()._actor_update_batch(batch)
+        if self.config.trainer.balance_batch or self.config.get('opd', {}).get('enabled', False):
+            raise ValueError('Clean RLVR dispatch requires fixed optimizer groups and no OPD')
+        from .parallelism import prepare_legacy_actor_batch
+        minibatch = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        dp = self.actor_rollout_wg.world_size // self.config.actor_rollout_ref.actor.ulysses_sequence_parallel_size
+        return prepare_legacy_actor_batch(batch, minibatch, dp, self.config.mixture.legacy_microbatch_token_budget)
+
     def _save_checkpoint(self):
         folder = Path(self.config.trainer.default_local_dir) / f'global_step_{self.global_steps}'
         folder.mkdir(parents=True, exist_ok=True)
