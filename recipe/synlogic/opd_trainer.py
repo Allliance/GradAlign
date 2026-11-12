@@ -35,8 +35,8 @@ class OPDTrainer(SynLogicTrainer):
                 metrics['noise/outcome_' + name] = outcome_metrics['noise/' + name]
         if settings.get('fixed_teacher_coefficient') is not None:
             coefficient = float(settings.fixed_teacher_coefficient)
-            if coefficient != 1.0 or settings.calibrate:
-                raise ValueError('This protocol requires the user-fixed teacher coefficient1.0')
+            if coefficient != 0.01 or settings.calibrate:
+                raise ValueError('This protocol requires the user-fixed teacher coefficient0.01')
             batch.batch['outcome_advantages'] = batch.batch['advantages'].detach().clone()
             combined, dense, values = combine_advantages(
                 batch.batch['advantages'], batch.batch['teacher_log_probs'], batch.batch['old_log_probs'],
