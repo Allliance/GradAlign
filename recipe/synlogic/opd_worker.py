@@ -46,6 +46,10 @@ class OPDReferenceWorker(AllocatedGPUWorker):
             config.ref.ulysses_sequence_parallel_size = 1
         with open_dict(config.actor.fsdp_config):
             config.actor.fsdp_config.fsdp_size = 1
+        self.teacher_only = not config.ref.get('compute_base_reference', True)
+        if self.teacher_only:
+            with open_dict(config.model):
+                config.model.path = config.ref.teacher_model_path
         super().__init__(config, role)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -53,6 +57,9 @@ class OPDReferenceWorker(AllocatedGPUWorker):
         super().init_model()
         if not self._is_ref or self.world_size != 1:
             raise ValueError('OPD reference worker requires its own single GPU')
+        if self.teacher_only:
+            self.teacher_policy = self.ref_policy
+            return
         self.teacher_module = self._build_model_optimizer(
             model_path=self.config.ref.teacher_model_path,
             fsdp_config=self.config.ref.fsdp_config, optim_config=None,
@@ -66,6 +73,9 @@ class OPDReferenceWorker(AllocatedGPUWorker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data):
         result = super().compute_ref_log_prob(data)
+        if self.teacher_only:
+            result.batch['teacher_log_probs'] = result.batch.pop('ref_log_prob')
+            return result
         data = data.to(get_device_id())
         data.meta_info.update(micro_batch_size=self.config.ref.log_prob_micro_batch_size_per_gpu,
                               temperature=self.config.rollout.temperature,

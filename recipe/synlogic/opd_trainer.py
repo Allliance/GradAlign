@@ -33,6 +33,19 @@ class OPDTrainer(SynLogicTrainer):
         for name in ('active_rate', 'active_groups', 'groups'):
             if 'noise/' + name in outcome_metrics:
                 metrics['noise/outcome_' + name] = outcome_metrics['noise/' + name]
+        if settings.get('fixed_teacher_coefficient') is not None:
+            coefficient = float(settings.fixed_teacher_coefficient)
+            if coefficient != 1.0 or settings.calibrate:
+                raise ValueError('This protocol requires the user-fixed teacher coefficient1.0')
+            batch.batch['outcome_advantages'] = batch.batch['advantages'].detach().clone()
+            combined, dense, values = combine_advantages(
+                batch.batch['advantages'], batch.batch['teacher_log_probs'], batch.batch['old_log_probs'],
+                batch.batch['response_mask'], settings.outcome_coefficient, coefficient)
+            batch.batch['advantages'], batch.batch['teacher_advantages'] = combined, dense
+            batch.meta_info.update(opd_loss_mode='importance_sampling',opd_teacher_coefficient=coefficient,
+                                   opd_outcome_coefficient=float(settings.outcome_coefficient))
+            metrics.update(values)
+            return batch
         path = Path(settings.calibration_file)
         if not settings.calibrate and not path.exists():
             self._progress('waiting_shared_teacher_calibration')
@@ -79,3 +92,16 @@ class OPDTrainer(SynLogicTrainer):
                                opd_outcome_coefficient=float(settings.outcome_coefficient))
         metrics.update(values)
         return batch
+
+    def _actor_update_batch(self, batch):
+        if not self.config.opd.get('preserve_global_minibatches', False):
+            return batch
+        if self.config.trainer.balance_batch:
+            raise ValueError("Preserved optimizer minibatches require driver token balancing disabled")
+        from .parallelism import prepare_actor_batch, prepare_legacy_actor_batch
+        minibatch = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        dp_size = self.actor_rollout_wg.world_size // self.config.actor_rollout_ref.actor.ulysses_sequence_parallel_size
+        original_budget = self.config.opd.get('legacy_microbatch_token_budget')
+        if original_budget:
+            return prepare_legacy_actor_batch(batch, minibatch, dp_size, original_budget)
+        return prepare_actor_batch(batch, minibatch, dp_size)
