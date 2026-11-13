@@ -64,6 +64,7 @@ class TaskRunner:
         tokenizer = verify_base_template(hf_tokenizer(config.actor_rollout_ref.model.path))
         opd_enabled = config.get('opd', {}).get('enabled', False)
         from .clean_rlvr_worker import CleanRLVRReferenceWorker
+        from .clean_rlvr_actor_worker import CleanRLVRActorWorker
         from .input_contract import verify_contract
         guard = verify_contract(config.provenance.input_contract,
                                 config.data.train_files, config.data.val_files)
@@ -72,7 +73,8 @@ class TaskRunner:
             from .opd_worker import OPDActorWorker, OPDReferenceWorker
             from .opd_trainer import OPDTrainer
         actor_class = (OPDActorWorker if opd_enabled else AlignmentWorker
-                       if config.mixture.condition == 'mixture-gradalign' else ActorRolloutRefWorker)
+                       if config.mixture.condition == 'mixture-gradalign' else CleanRLVRActorWorker
+                       if config.actor_rollout_ref.ref.get('initial_base_model_path') else ActorRolloutRefWorker)
         roles = {Role.ActorRollout: ray.remote(actor_class),
                  Role.RefPolicy: ray.remote(OPDReferenceWorker if opd_enabled else CleanRLVRReferenceWorker
                      if config.actor_rollout_ref.ref.get('initial_base_model_path') else ActorRolloutRefWorker)}
