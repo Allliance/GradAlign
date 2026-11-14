@@ -28,6 +28,19 @@ class AllocatedGPUWorker(ActorRolloutRefWorker):
             torch.cuda.set_device(device)
         super().__init__(config, role)
 
+    def _check_ta_alignment(self,data,reference,actual,role):
+        import json,time
+        from pathlib import Path
+        length=actual.shape[1]
+        mask=data.batch['attention_mask'][:len(actual),-length:].bool().cpu()
+        diff=(reference.cpu()-actual.cpu()).abs()[mask]
+        mean=float(diff.mean());maximum=float(diff.max())
+        assert mean<.03 and maximum<1.,f'TA causal-logprob alignment failed: {mean}, {maximum}'
+        root=Path(os.environ['SYNLOGIC_RUN_ROOT'])
+        proof={'passed':True,'role':role,'rank':self.rank,'mean_abs_logprob_difference':mean,
+               'max_abs_logprob_difference':maximum,'positions':int(mask.sum()),'epoch':time.time()}
+        (root/f'ta-gpu-alignment-{role}-rank{self.rank}.json').write_text(json.dumps(proof))
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def opd_device_identity(self):
         import ray
@@ -71,7 +84,7 @@ class OPDReferenceWorker(AllocatedGPUWorker):
         self.teacher_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.teacher_module)
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def compute_ref_log_prob(self, data):
+    def _compute_original_ref_log_prob(self, data):
         result = super().compute_ref_log_prob(data)
         if self.teacher_only:
             result.batch['teacher_log_probs'] = result.batch.pop('ref_log_prob')
@@ -89,7 +102,49 @@ class OPDReferenceWorker(AllocatedGPUWorker):
         return result.union(teacher)
 
 
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_ref_log_prob(self, data):
+        if not self.config.ref.get('ta_support_k'):
+            return self._compute_original_ref_log_prob(data)
+        assert self.teacher_only and self.ulysses_sequence_parallel_size==1
+        from .ta_opd import score_support
+        baseline=None if getattr(self,'_ta_scoring_checked',False) else self._compute_original_ref_log_prob(data[:2])
+        result=score_support(self.teacher_policy.actor_module,data,
+            temperature=self.config.rollout.temperature,k=int(self.config.ref.ta_support_k),
+            candidate_key='ta_student_ids')
+        if baseline is not None:
+            self._check_ta_alignment(data,baseline.batch['teacher_log_probs'],result['chosen_lp'][:2],'teacher')
+            self._ta_scoring_checked=True
+        return DataProto.from_dict(tensors={'teacher_log_probs':result['chosen_lp'],
+            'ta_teacher_ids':result['ids'],'ta_teacher_lp':result['lp'],
+            'ta_teacher_on_student_lp':result['candidate_lp']})
+
+
 class OPDActorWorker(AllocatedGPUWorker):
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_log_prob(self, data):
+        if not self.config.actor.get('ta_support_k'):
+            return super().compute_log_prob(data)
+        assert self.ulysses_sequence_parallel_size==1 and not self._is_offload_param
+        from .ta_opd import score_support
+        baseline=None if getattr(self,'_ta_scoring_checked',False) else super().compute_log_prob(data[:2])
+        result=score_support(self.actor.actor_module,data,
+            temperature=self.config.rollout.temperature,k=int(self.config.actor.ta_support_k),entropy=True)
+        if baseline is not None:
+            self._check_ta_alignment(data,baseline.batch['old_log_probs'],result['chosen_lp'][:2],'student')
+            self._ta_scoring_checked=True
+        return DataProto.from_dict(tensors={'old_log_probs':result['chosen_lp'],
+            'entropys':result['entropy'],'ta_student_ids':result['ids'],
+            'ta_student_lp':result['lp']},meta_info={'temperature':self.config.rollout.temperature})
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_ta_candidates(self,data):
+        assert self.config.actor.get('ta_support_k') and self.ulysses_sequence_parallel_size==1
+        from .ta_opd import score_support
+        result=score_support(self.actor.actor_module,data,
+            temperature=self.config.rollout.temperature,k=0,candidate_key='ta_teacher_ids')
+        return DataProto.from_dict(tensors={'ta_student_on_teacher_lp':result['candidate_lp']})
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def calibrate_opd(self, data):
         """Measure real policy gradients without changing weights or Adam state."""

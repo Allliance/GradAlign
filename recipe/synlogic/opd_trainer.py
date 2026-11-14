@@ -35,16 +35,39 @@ class OPDTrainer(SynLogicTrainer):
                 metrics['noise/outcome_' + name] = outcome_metrics['noise/' + name]
         if settings.get('fixed_teacher_coefficient') is not None:
             coefficient = float(settings.fixed_teacher_coefficient)
-            if coefficient != 1.0 or settings.calibrate:
-                raise ValueError('This protocol requires the user-fixed teacher coefficient1.0')
+            if coefficient not in (1.0,0.001) or settings.calibrate:
+                raise ValueError('This study uses explicit fixed teacher coefficients1 or0.001')
             batch.batch['outcome_advantages'] = batch.batch['advantages'].detach().clone()
             combined, dense, values = combine_advantages(
                 batch.batch['advantages'], batch.batch['teacher_log_probs'], batch.batch['old_log_probs'],
                 batch.batch['response_mask'], settings.outcome_coefficient, coefficient)
             batch.batch['advantages'], batch.batch['teacher_advantages'] = combined, dense
-            batch.meta_info.update(opd_loss_mode='importance_sampling',opd_teacher_coefficient=coefficient,
+            batch.meta_info.update(opd_loss_mode=self.config.actor_rollout_ref.actor.get('opd_loss_mode', 'importance_sampling'),opd_teacher_coefficient=coefficient,
                                    opd_outcome_coefficient=float(settings.outcome_coefficient))
             metrics.update(values)
+            if settings.get('teachability', False):
+                from .ta_opd import support_disagreement, select_teachable
+                extra = self.actor_rollout_wg.compute_ta_candidates(batch)
+                batch = batch.union(extra)
+                d,c = support_disagreement(batch.batch['ta_student_ids'],batch.batch['ta_student_lp'],
+                    batch.batch['ta_teacher_ids'],batch.batch['ta_teacher_lp'],
+                    batch.batch['ta_teacher_on_student_lp'],batch.batch['ta_student_on_teacher_lp'])
+                valid = batch.batch['response_mask'].bool()
+                chosen,score = select_teachable(d,c,valid,float(settings.ta_retention))
+                batch.batch['opd_token_mask']=chosen
+                batch.batch['ta_disagreement']=d
+                batch.batch['ta_compatibility']=c
+                batch.batch['ta_score']=score
+                batch.batch['teacher_advantages'] *= chosen
+                batch.batch['advantages'] = (settings.outcome_coefficient*batch.batch['outcome_advantages']
+                    + coefficient*batch.batch['teacher_advantages'])
+                metrics.update({'ta/retained_tokens':int(chosen.sum()),'ta/valid_tokens':int(valid.sum()),
+                    'ta/retained_fraction':float(chosen.sum()/valid.sum()),
+                    'ta/selected_compatibility':float(c[chosen].mean()),
+                    'ta/selected_disagreement':float(d[chosen].mean())})
+                for key in ['ta_student_ids','ta_student_lp','ta_teacher_ids','ta_teacher_lp',
+                            'ta_teacher_on_student_lp','ta_student_on_teacher_lp']:
+                    batch.batch.pop(key)
             return batch
         path = Path(settings.calibration_file)
         if not settings.calibrate and not path.exists():

@@ -18,6 +18,14 @@ def prepare_actor_batch(batch, minibatch, dp_size):
     if (totals <= 0).any():
         raise ValueError('An optimizer minibatch contains no response tokens')
     batch.batch['global_minibatch_response_tokens'] = totals
+    if 'opd_token_mask' in batch.batch:
+        selected=batch.batch['opd_token_mask'].sum(-1).reshape(-1,minibatch).sum(-1).repeat_interleave(minibatch)
+        if (selected<=0).any():
+            raise ValueError('TA selection left an optimizer minibatch without teacher tokens')
+        batch.batch['global_opd_response_tokens']=selected
+        if batch.meta_info.get('opd_loss_mode') != 'importance_sampling':
+            # PPO is homogeneous in A for positive scaling: this implements a selected-token mean.
+            batch.batch['advantages'] *= (totals/selected).unsqueeze(-1)
     return batch[rank_major_indices(len(batch), minibatch, dp_size)]
 
 
