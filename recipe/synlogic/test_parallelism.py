@@ -50,7 +50,7 @@ def test_legacy_microbatch_weighting_is_preserved_after_repartition():
 
 @pytest.mark.parametrize('outcome',[0,1])
 def test_explicit_teacher_one_never_reads_or_waits_for_calibration(outcome):
- dummy=SimpleNamespace(config=OmegaConf.create({'opd':{'fixed_teacher_coefficient':1.,'calibrate':False,'outcome_coefficient':outcome}}))
+ dummy=SimpleNamespace(config=OmegaConf.create({'opd':{'fixed_teacher_coefficient':1.,'calibrate':False,'outcome_coefficient':outcome},'actor_rollout_ref':{'actor':{'opd_loss_mode':'importance_sampling'}}}))
  batch=DataProto.from_dict(tensors={'advantages':torch.ones(1,2),'teacher_log_probs':torch.tensor([[-3.,-1.]]),'old_log_probs':torch.tensor([[-2.,-2.]]),'response_mask':torch.ones(1,2)})
  with patch('synlogic.opd_trainer.noise_metrics',return_value={}):result=OPDTrainer._transform_advantages(dummy,batch,{})
  torch.testing.assert_close(result.batch['teacher_advantages'],torch.tensor([[-1.,1.]]))

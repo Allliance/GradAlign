@@ -27,12 +27,77 @@ class OPDTrainer(SynLogicTrainer):
         root = Path(os.environ['SYNLOGIC_RUN_ROOT'])
         (root/'device-placement.json').write_text(json.dumps({'students':students,'teacher':teacher},indent=2)+'\n')
 
+    def _prepare_policy_scoring(self, batch, metrics):
+        if not self.config.opd.get('alternating_rl_taopd', False):
+            return batch
+        from src.alternating_opd import phase_for_step
+        actor = self.config.actor_rollout_ref.actor
+        if (not actor.get('alternating_rl_taopd', False) or actor.use_kl_loss
+                or actor.entropy_coeff != 0 or self.config.algorithm.use_kl_in_reward
+                or not self.config.actor_rollout_ref.ref.get('alternating_rl_taopd', False)
+                or self.config.opd.outcome_coefficient != 0
+                or self.config.opd.fixed_teacher_coefficient != 1
+                or not self.config.opd.teachability):
+            raise ValueError('Alternating objective configuration differs from the protocol')
+        # New rollouts must never inherit scoring/selection tensors from another phase.
+        for key in list(batch.batch.keys()):
+            if key.startswith('ta_') or key in ('opd_token_mask', 'global_opd_response_tokens',
+                    'teacher_log_probs', 'teacher_advantages', 'outcome_advantages', 'ref_log_prob'):
+                batch.batch.pop(key)
+        phase = phase_for_step(self.global_steps)
+        batch.meta_info.update(alternating_phase=phase, opd_loss_mode=(
+            'importance_sampling' if phase['phase'] == 'ta_opd' else 'rl_only'),
+            opd_teacher_coefficient=phase['teacher_coefficient'],
+            opd_outcome_coefficient=phase['outcome_coefficient'])
+        metrics.update({'alternating/' + k: v for k, v in phase.items() if k != 'phase'})
+        metrics['alternating/phase_is_ta_opd'] = int(phase['phase'] == 'ta_opd')
+        metrics['alternating/phase'] = int(phase['phase'] == 'ta_opd')
+        metrics['alternating/optimizer_updates_before'] = (self.global_steps - 1) * 5
+        return batch
+
+    def _reference_policy_required(self, batch):
+        if self.config.opd.get('alternating_rl_taopd', False):
+            from src.alternating_opd import phase_for_step
+            phase = phase_for_step(self.global_steps)
+            if batch.meta_info.get('alternating_phase') != phase:
+                raise ValueError('Phase must be prepared before any teacher query')
+            return phase['phase'] == 'ta_opd'
+        return self.use_reference_policy
+
+    def _phase_denominators(self, batch, metrics):
+        minibatch = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        counts = batch.batch['response_mask'].sum(-1).reshape(-1, minibatch).sum(-1)
+        batch.batch['global_minibatch_response_tokens'] = counts.repeat_interleave(minibatch)
+        chosen = batch.batch.get('opd_token_mask')
+        if chosen is not None:
+            selected = chosen.sum(-1).reshape(-1, minibatch).sum(-1)
+            batch.batch['global_opd_response_tokens'] = selected.repeat_interleave(minibatch)
+        else:
+            selected = counts.new_zeros(counts.shape)
+        for i, (original, retained) in enumerate(zip(counts.tolist(), selected.tolist()), 1):
+            metrics[f'alternating/minibatch_{i}_original_tokens'] = original
+            metrics[f'alternating/minibatch_{i}_selected_tokens'] = retained
+        return batch
+
     def _transform_advantages(self, batch, metrics):
         settings = self.config.opd
         outcome_metrics = noise_metrics(batch)
         for name in ('active_rate', 'active_groups', 'groups'):
             if 'noise/' + name in outcome_metrics:
                 metrics['noise/outcome_' + name] = outcome_metrics['noise/' + name]
+        if settings.get('alternating_rl_taopd', False):
+            from src.alternating_opd import phase_for_step
+            phase = phase_for_step(self.global_steps)
+            if batch.meta_info.get('alternating_phase') != phase:
+                raise ValueError('Absolute phase differs before advantage transform')
+            if phase['phase'] == 'rl':
+                if any(k.startswith('ta_') or k in ('teacher_advantages', 'teacher_log_probs',
+                        'opd_token_mask', 'outcome_advantages') for k in batch.batch.keys()):
+                    raise ValueError('Teacher data entered the RL-only branch')
+                metrics.update({'ta/retained_tokens': 0, 'ta/valid_tokens': int(batch.batch['response_mask'].sum()),
+                                'alternating/selected_token_denominator': 0,
+                                'opd/teacher_coefficient': 0., 'opd/outcome_coefficient': 1.})
+                return self._phase_denominators(batch, metrics)
         if settings.get('fixed_teacher_coefficient') is not None:
             coefficient = float(settings.fixed_teacher_coefficient)
             if coefficient not in (1.0,0.001) or settings.calibrate:
@@ -65,9 +130,13 @@ class OPDTrainer(SynLogicTrainer):
                     'ta/retained_fraction':float(chosen.sum()/valid.sum()),
                     'ta/selected_compatibility':float(c[chosen].mean()),
                     'ta/selected_disagreement':float(d[chosen].mean())})
+                if settings.get('alternating_rl_taopd', False):
+                    metrics['alternating/selected_token_denominator'] = int(chosen.sum())
                 for key in ['ta_student_ids','ta_student_lp','ta_teacher_ids','ta_teacher_lp',
                             'ta_teacher_on_student_lp','ta_student_on_teacher_lp']:
                     batch.batch.pop(key)
+            if settings.get('alternating_rl_taopd', False):
+                return self._phase_denominators(batch, metrics)
             return batch
         path = Path(settings.calibration_file)
         if not settings.calibrate and not path.exists():

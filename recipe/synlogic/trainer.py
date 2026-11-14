@@ -85,6 +85,9 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
         if self.config.get('opd', {}).get('enabled', False):
             state['initial_source_step'] = self.config.opd.get('source_step', 300)
             state['teacher_fingerprint'] = self.config.opd.teacher_fingerprint
+        if self.config.get('opd', {}).get('alternating_rl_taopd', False):
+            from src.alternating_opd import checkpoint_phase
+            state['alternating_phase'] = checkpoint_phase(self.global_steps)
         path = folder / 'experiment_state.json'
         temporary = path.with_suffix('.tmp')
         temporary.write_text(json.dumps(state, indent=2) + '\n')
@@ -98,6 +101,9 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
             if self.config.trainer.resume_mode == 'resume_path':
                 folder = Path(self.config.trainer.resume_from_path)
             state = json.loads((folder / 'experiment_state.json').read_text())
+            if self.config.get('opd', {}).get('alternating_rl_taopd', False):
+                from src.alternating_opd import validate_checkpoint_phase
+                validate_checkpoint_phase(state)
             if (state['step'] != self.global_steps or state['protocol_id'] != self.config.provenance.protocol_id
                     or state['prompt_template_sha256'] != self.config.provenance.prompt_template_sha256
                     or state['world_size'] != self.config.trainer.n_gpus_per_node

@@ -68,6 +68,9 @@ def main():
     folder = args.checkpoint
     state = json.loads((folder/'experiment_state.json').read_text())
     world, step = state['world_size'], state['step']
+    if 'alternating_phase' in state:
+        from src.alternating_opd import validate_checkpoint_phase
+        validate_checkpoint_phase(state)
     require(json.loads((folder/'complete.json').read_text())['step'] == step, 'Incomplete checkpoint')
     require(folder.name == f'global_step_{step}', 'Checkpoint step mismatch')
     if 'RANK' not in os.environ:
@@ -105,6 +108,8 @@ def main():
         counters = [float(item['step']) for item in optimizer['state'].values() if 'step' in item]
         expected = state.get('optimizer_updates', step)
         require(counters and all(counter >= expected for counter in counters), 'Old optimizer counters')
+        if 'alternating_phase' in state:
+            require(all(counter == expected for counter in counters), 'Alternating optimizer counter mismatch')
         require(all(math.isfinite(group['lr']) and group['lr'] > 0 for group in optimizer['param_groups']), 'Invalid learning rate')
         finite(optimizer)
         del optimizer

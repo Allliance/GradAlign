@@ -104,6 +104,11 @@ class OPDReferenceWorker(AllocatedGPUWorker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data):
+        if self.config.ref.get('alternating_rl_taopd', False):
+            from src.alternating_opd import phase_for_step
+            phase = data.meta_info.get('alternating_phase', {})
+            if phase != phase_for_step(phase.get('outer_step')) or phase['phase'] != 'ta_opd':
+                raise ValueError('Teacher query outside the prepared TA phase')
         if not self.config.ref.get('ta_support_k'):
             return self._compute_original_ref_log_prob(data)
         assert self.teacher_only and self.ulysses_sequence_parallel_size==1
@@ -122,6 +127,13 @@ class OPDReferenceWorker(AllocatedGPUWorker):
 class OPDActorWorker(AllocatedGPUWorker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data):
+        if self.config.actor.get('alternating_rl_taopd', False):
+            from src.alternating_opd import phase_for_step
+            phase = data.meta_info.get('alternating_phase', {})
+            if phase != phase_for_step(phase.get('outer_step')):
+                raise ValueError('Student scoring requires an explicit absolute phase')
+            if phase['phase'] == 'rl':
+                return super().compute_log_prob(data)
         if not self.config.actor.get('ta_support_k'):
             return super().compute_log_prob(data)
         assert self.ulysses_sequence_parallel_size==1 and not self._is_offload_param
