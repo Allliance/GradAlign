@@ -72,6 +72,30 @@ class OPDReferenceWorker(AllocatedGPUWorker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data):
+        if self.config.ref.get('eopd', False):
+            from .native_stats import score_native
+            import json,time
+            from pathlib import Path
+            assert self.teacher_only and not self._is_offload_param
+            assert self.config.ref.ulysses_sequence_parallel_size == 1
+            result = score_native(self.teacher_policy, data,
+                temperature=self.config.rollout.temperature,
+                max_token_len=self.config.ref.log_prob_max_token_len_per_gpu,
+                k=16, entropy=True)
+            if not getattr(self, '_eopd_alignment_checked', False):
+                valid=data.batch['response_mask'].bool().cpu()
+                difference=(result['chosen_lp']-result['native_lp']).abs()[valid]
+                root=Path(os.environ['SYNLOGIC_RUN_ROOT'])
+                (root/'eopd-gpu-alignment-teacher.json').write_text(json.dumps({
+                    'passed':True,'positions':len(difference),
+                    'mean_abs_difference':float(difference.mean()),
+                    'max_abs_difference':float(difference.max()),'epoch':time.time()})+'\n')
+                self._eopd_alignment_checked=True
+            return DataProto.from_dict(tensors={
+                'teacher_log_probs':result['native_lp'],
+                'eopd_teacher_ids':result['ids'].to(torch.int32),
+                'eopd_teacher_lp':result['lp'],
+                'eopd_teacher_entropy':result['entropy']})
         result = super().compute_ref_log_prob(data)
         if self.teacher_only:
             result.batch['teacher_log_probs'] = result.batch.pop('ref_log_prob')

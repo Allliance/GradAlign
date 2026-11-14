@@ -29,6 +29,14 @@ class OPDTrainer(SynLogicTrainer):
 
     def _transform_advantages(self, batch, metrics):
         settings = self.config.opd
+        if settings.get('eopd', False):
+            assert self.config.actor_rollout_ref.actor.eopd
+            assert settings.outcome_coefficient == 0 and settings.fixed_teacher_coefficient == 1
+            assert not self.config.actor_rollout_ref.actor.use_kl_loss
+            assert self.config.actor_rollout_ref.actor.opd_loss_mode == 'ppo_clipped_teacher'
+            metrics.update({'eopd/alpha':1.,'eopd/entropy_threshold':.8,
+                            'eopd/teacher_top_k':16.,'eopd/student_full_vocab_normalization':1.,
+                            'eopd/strict_entropy_gate':1.,'eopd/outcome_coefficient':0.})
         outcome_metrics = noise_metrics(batch)
         for name in ('active_rate', 'active_groups', 'groups'):
             if 'noise/' + name in outcome_metrics:
