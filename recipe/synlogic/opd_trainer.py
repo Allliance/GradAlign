@@ -27,24 +27,85 @@ class OPDTrainer(SynLogicTrainer):
         root = Path(os.environ['SYNLOGIC_RUN_ROOT'])
         (root/'device-placement.json').write_text(json.dumps({'students':students,'teacher':teacher},indent=2)+'\n')
 
+    def _teacher_log_probs(self,batch):
+        if not self.config.opd.get('tip',False):return self.ref_policy_wg.compute_ref_log_prob(batch)
+        from verl import DataProto
+        version=int(self.global_steps);heads=self.actor_rollout_wg.get_tip_student_head()
+        weight=next(w for w in heads if w is not None)
+        self.ref_policy_wg.set_tip_student_head(weight,version)
+        del heads,weight
+        batch.meta_info['tip_policy_version']=version;parts=[]
+        for start in range(0,len(batch),32):
+            micro=batch[start:start+32]
+            micro=micro.union(self.actor_rollout_wg.compute_tip_hidden(micro))
+            parts.append(self.ref_policy_wg.compute_tip_statistics(micro))
+        return DataProto.concat(parts)
+
     def _transform_advantages(self, batch, metrics):
         settings = self.config.opd
+        if settings.get('oracle_opsd',False):
+            assert self.config.actor_rollout_ref.actor.oracle_opsd
+            assert settings.outcome_coefficient==0 and not self.config.actor_rollout_ref.actor.use_kl_loss
+            # The actor directly optimizes forward KL; no outcome advantage or sampled-RKL term enters it.
+            batch.batch['outcome_advantages']=batch.batch['advantages'].detach().clone()
+            batch.batch['advantages'].zero_()
+            batch.meta_info.update(oracle_opsd=True,opd_loss_mode='oracle_forward_kl')
+            metrics.update({'opsd/fixed_teacher':1.,'opsd/answer_only_privilege':1.,'opsd/teacher_top_k':100.,'opsd/vocabulary_clip':.05,'opsd/reference_kl_coefficient':0.,'opsd/outcome_coefficient':0.})
+            return batch
         outcome_metrics = noise_metrics(batch)
         for name in ('active_rate', 'active_groups', 'groups'):
             if 'noise/' + name in outcome_metrics:
                 metrics['noise/outcome_' + name] = outcome_metrics['noise/' + name]
         if settings.get('fixed_teacher_coefficient') is not None:
             coefficient = float(settings.fixed_teacher_coefficient)
-            if coefficient != 1.0 or settings.calibrate:
-                raise ValueError('This protocol requires the user-fixed teacher coefficient1.0')
+            if coefficient not in (1.0,0.001) or settings.calibrate:
+                raise ValueError('This study uses explicit fixed teacher coefficients1 or0.001')
             batch.batch['outcome_advantages'] = batch.batch['advantages'].detach().clone()
             combined, dense, values = combine_advantages(
                 batch.batch['advantages'], batch.batch['teacher_log_probs'], batch.batch['old_log_probs'],
                 batch.batch['response_mask'], settings.outcome_coefficient, coefficient)
             batch.batch['advantages'], batch.batch['teacher_advantages'] = combined, dense
-            batch.meta_info.update(opd_loss_mode='importance_sampling',opd_teacher_coefficient=coefficient,
+            batch.meta_info.update(opd_loss_mode=self.config.actor_rollout_ref.actor.get('opd_loss_mode', 'importance_sampling'),opd_teacher_coefficient=coefficient,
                                    opd_outcome_coefficient=float(settings.outcome_coefficient))
             metrics.update(values)
+            if settings.get('tip', False):
+                import torch
+                from verl import DataProto
+                from .tip_stats import select_tip
+                chosen,score=select_tip(batch.batch['tip_entropy'],batch.batch['tip_rkl'],
+                    batch.batch['response_mask'],float(settings.tip_retention))
+                batch.batch['opd_token_mask']=chosen
+                batch.batch['tip_score']=score
+                batch.batch['teacher_advantages'] *= chosen
+                batch.batch['advantages']=coefficient*batch.batch['teacher_advantages']
+                metrics.update({'tip/retained_tokens':int(chosen.sum()),
+                    'tip/valid_tokens':int(batch.batch['response_mask'].sum()),
+                    'tip/retained_fraction':float(chosen.sum()/batch.batch['response_mask'].sum()),
+                    'tip/selected_entropy':float(batch.batch['tip_entropy'][chosen].mean()),
+                    'tip/selected_rkl':float(batch.batch['tip_rkl'][chosen].mean())})
+            if settings.get('teachability', False):
+                from .ta_opd import support_disagreement, select_teachable
+                extra = self.actor_rollout_wg.compute_ta_candidates(batch)
+                batch = batch.union(extra)
+                d,c = support_disagreement(batch.batch['ta_student_ids'],batch.batch['ta_student_lp'],
+                    batch.batch['ta_teacher_ids'],batch.batch['ta_teacher_lp'],
+                    batch.batch['ta_teacher_on_student_lp'],batch.batch['ta_student_on_teacher_lp'])
+                valid = batch.batch['response_mask'].bool()
+                chosen,score = select_teachable(d,c,valid,float(settings.ta_retention))
+                batch.batch['opd_token_mask']=chosen
+                batch.batch['ta_disagreement']=d
+                batch.batch['ta_compatibility']=c
+                batch.batch['ta_score']=score
+                batch.batch['teacher_advantages'] *= chosen
+                batch.batch['advantages'] = (settings.outcome_coefficient*batch.batch['outcome_advantages']
+                    + coefficient*batch.batch['teacher_advantages'])
+                metrics.update({'ta/retained_tokens':int(chosen.sum()),'ta/valid_tokens':int(valid.sum()),
+                    'ta/retained_fraction':float(chosen.sum()/valid.sum()),
+                    'ta/selected_compatibility':float(c[chosen].mean()),
+                    'ta/selected_disagreement':float(d[chosen].mean())})
+                for key in ['ta_student_ids','ta_student_lp','ta_teacher_ids','ta_teacher_lp',
+                            'ta_teacher_on_student_lp','ta_student_on_teacher_lp']:
+                    batch.batch.pop(key)
             return batch
         path = Path(settings.calibration_file)
         if not settings.calibrate and not path.exists():

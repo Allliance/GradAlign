@@ -142,13 +142,19 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
         import verl.utils.tracking as tracking
         original = tracking.Tracking
         trainer = self
+        metadata=json.loads((Path(self.config.mixture.root)/'runs'/self.config.mixture.condition/'portable-provenance.json').read_text())
+        logging_offset=int(metadata.get('logging_step_offset',0))
+        logging_lineage=int(metadata.get('logging_lineage_id',metadata.get('recovery_lineage',{}).get('id',1)))
 
         class MixtureTracking(original):
             def log(self, data, step):
                 data.update(trainer.reward_fn.metrics)
                 data.update(trainer.alignment_metrics)
                 data['mixture/world_size'] = trainer.config.trainer.n_gpus_per_node
-                return super().log(data, step)
+                data['training/outer_step']=step
+                data['training/recovery_lineage']=logging_lineage
+                data['training/logging_step']=step+logging_offset
+                return super().log(data, step+logging_offset)
 
         tracking.Tracking = MixtureTracking
         try:
