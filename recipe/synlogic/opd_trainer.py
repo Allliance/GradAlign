@@ -42,7 +42,7 @@ class OPDTrainer(SynLogicTrainer):
                 batch.batch['advantages'], batch.batch['teacher_log_probs'], batch.batch['old_log_probs'],
                 batch.batch['response_mask'], settings.outcome_coefficient, coefficient)
             batch.batch['advantages'], batch.batch['teacher_advantages'] = combined, dense
-            batch.meta_info.update(opd_loss_mode='importance_sampling',opd_teacher_coefficient=coefficient,
+            batch.meta_info.update(opd_loss_mode=self.config.actor_rollout_ref.actor.get('opd_loss_mode', 'importance_sampling'),opd_teacher_coefficient=coefficient,
                                    opd_outcome_coefficient=float(settings.outcome_coefficient))
             metrics.update(values)
             return batch
