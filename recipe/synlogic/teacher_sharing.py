@@ -4,6 +4,9 @@ Every process sharing a physical GPU must use the same host-local directory.
 The launcher owns GPU placement; this module never allocates a device. Kernel
 file locks release admission and execution slots even when a worker crashes.
 """
+
+if not __debug__:
+    raise RuntimeError('Teacher sharing requires Python safety checks enabled')
 from contextlib import contextmanager
 import fcntl
 import json
@@ -131,7 +134,13 @@ def _sharing(worker, config, required=False):
     from omegaconf import OmegaConf
     options = OmegaConf.to_container(sharing, resolve=True)
     if required:
-        if not os.path.ismount('/run/teacher-sharing'):
+        mounted = os.path.ismount('/run/teacher-sharing')
+        if not mounted:
+            # Bind mounts on the same filesystem can share st_dev. The kernel
+            # mount table is authoritative in that case (rootless OCI rootfs).
+            mounted = any(line.split()[4] == '/run/teacher-sharing'
+                          for line in Path('/proc/self/mountinfo').read_text().splitlines())
+        if not mounted:
             raise ValueError('Packed teacher requires the host-local sharing bind mount')
         if not Path(options['directory']).is_relative_to('/run/teacher-sharing'):
             raise ValueError('Packed teacher gate must be inside the sharing bind mount')
