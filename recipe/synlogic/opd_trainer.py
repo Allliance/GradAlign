@@ -31,6 +31,8 @@ class OPDTrainer(SynLogicTrainer):
         settings = self.config.opd
         if settings.get('oracle_opsd',False):
             assert self.config.actor_rollout_ref.actor.oracle_opsd
+            loss=self.config.actor_rollout_ref.actor.policy_loss
+            assert loss.beta==0 and loss.full_logit_distill and loss.top_k_distill==100 and loss.distill_add_tail and loss.jsd_token_clip==0.05,'Oracle OPSD must match the verified upstream sparse forward-KL objective'
             assert settings.outcome_coefficient==0 and not self.config.actor_rollout_ref.actor.use_kl_loss
             # The actor directly optimizes forward KL; no outcome advantage or sampled-RKL term enters it.
             batch.batch['outcome_advantages']=batch.batch['advantages'].detach().clone()

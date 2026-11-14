@@ -101,14 +101,17 @@ def privileged_batch(data,tokenizer,answers):
         entry=answers[str(int(extra['index']))]
         assert hashlib.sha256(extra['original_game_data_str'].encode()).hexdigest()==entry['original_game_sha256']
         source=data.batch['prompts'][i,promptmask[i]].tolist()
-        # Insert inside the final user message; preserve every original prompt token.
+        # Insert inside the final user message and canonically tokenize only the teacher prefix.
         boundary=max(j for j,t in enumerate(source) if t==end)
         suffix=tokenizer.decode(source[boundary:],skip_special_tokens=False)
         assert suffix=='<|im_end|>\n<|im_start|>assistant\n',repr(suffix)
         privilege='\n\nPrivileged reference for this training problem (correct final answer only):\n'+entry['answer']+'\nUse this answer to guide reasoning while following the original requested output format.\n'
         added=tokenizer.encode(privilege,add_special_tokens=False)
         assert end not in added and tokenizer.convert_tokens_to_ids('<|im_start|>') not in added
-        prefixes.append(source[:boundary]+added+source[boundary:])
+        text=tokenizer.decode(source[:boundary],skip_special_tokens=False)+privilege+suffix
+        prefix=tokenizer.encode(text,add_special_tokens=False)
+        assert tokenizer.decode(prefix,skip_special_tokens=False)==text
+        prefixes.append(prefix)
     plen=max(map(len,prefixes));device=responses.device
     p=torch.full((len(prefixes),plen),tokenizer.pad_token_id,dtype=torch.long,device=device);pm=torch.zeros_like(p)
     for i,prefix in enumerate(prefixes):p[i,-len(prefix):]=torch.tensor(prefix,device=device);pm[i,-len(prefix):]=1
