@@ -1,6 +1,8 @@
 """Student workers and a separate frozen base-reference/teacher worker."""
 from copy import deepcopy
+from contextlib import nullcontext
 import os
+import traceback
 
 import torch
 from omegaconf import OmegaConf, open_dict
@@ -11,6 +13,17 @@ from verl.utils.device import get_device_id
 from verl.workers.actor import DataParallelPPOActor
 from verl.workers.fsdp_workers import ActorRolloutRefWorker
 from verl.utils.ray_utils import ray_noset_visible_devices
+
+
+def _clear_exception_frames(error):
+    pending, seen = [error], set()
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        traceback.clear_frames(error.__traceback__)
+        pending.extend(e for e in (error.__cause__, error.__context__) if e is not None)
 
 
 class AllocatedGPUWorker(ActorRolloutRefWorker):
@@ -54,6 +67,35 @@ class OPDReferenceWorker(AllocatedGPUWorker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        self._teacher_sharing = None
+        sharing = self.config.ref.get('teacher_sharing')
+        if sharing:
+            from .teacher_sharing import TeacherGPUSharing
+            self._teacher_sharing = TeacherGPUSharing(**OmegaConf.to_container(sharing, resolve=True))
+        initialization_started = False
+        try:
+            with self._teacher_sharing.phase('initialization') if self._teacher_sharing else nullcontext():
+                initialization_started = True
+                try:
+                    self._init_teacher_model()
+                except BaseException as error:
+                    if self._teacher_sharing:
+                        _clear_exception_frames(error)
+                    raise
+                finally:
+                    if self._teacher_sharing:
+                        try:
+                            torch.cuda.synchronize()
+                        finally:
+                            torch.cuda.empty_cache()
+        except BaseException:
+            # A failed Ray method can leave model attributes resident. Keep its
+            # admission until the supervisor terminates the failed process.
+            if self._teacher_sharing and not initialization_started:
+                self._teacher_sharing.close()
+            raise
+
+    def _init_teacher_model(self):
         super().init_model()
         if not self._is_ref or self.world_size != 1:
             raise ValueError('OPD reference worker requires its own single GPU')
@@ -72,6 +114,40 @@ class OPDReferenceWorker(AllocatedGPUWorker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data):
+        gate = self._teacher_sharing
+        with gate.phase('scoring') if gate else nullcontext() as event:
+            if gate:
+                torch.cuda.reset_peak_memory_stats()
+            try:
+                result = self._compute_teacher_log_prob(data)
+            except BaseException as error:
+                if gate:
+                    # Failed model frames can otherwise retain logits and
+                    # microbatches until after the shared lock is released.
+                    _clear_exception_frames(error)
+                raise
+            finally:
+                if gate:
+                    # Native DataProto.to mutates the input in place. Return it
+                    # to CPU before empty_cache so its storage is released while
+                    # we still own the forward lock, on success and failure.
+                    try:
+                        try:
+                            data.to('cpu')
+                        finally:
+                            torch.cuda.synchronize()
+                    finally:
+                        try:
+                            event.update(peak_allocated_bytes=torch.cuda.max_memory_allocated(),
+                                         peak_reserved_bytes=torch.cuda.max_memory_reserved(),
+                                         instance_allocated_bytes=torch.cuda.memory_allocated(),
+                                         instance_reserved_bytes=torch.cuda.memory_reserved())
+                        finally:
+                            torch.cuda.empty_cache()
+                        event['reserved_after_release_bytes'] = torch.cuda.memory_reserved()
+            return result
+
+    def _compute_teacher_log_prob(self, data):
         result = super().compute_ref_log_prob(data)
         if self.teacher_only:
             result.batch['teacher_log_probs'] = result.batch.pop('ref_log_prob')

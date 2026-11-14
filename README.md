@@ -237,3 +237,13 @@ Typical artifacts under `ckpt_root/<experiment_name>/`:
 ## Acknowledgment
 
 This repository is built on top of VERL (`verl/`) and includes project-specific modifications for GradAlign data selection and analysis.
+
+### Colocating frozen OPD teachers
+
+`actor_rollout_ref.ref.teacher_sharing` optionally accepts `directory`, `instance_id` (a nonempty string), `max_instances` (at most four), and `timeout_seconds`. Provision one shared host-local directory per allocated physical GPU and bind the same directory into every participating teacher container. Each teacher remains a separate model/process. Admission locks bound resident instances; initialization and teacher forwards execute one at a time, with a bounded queue wait and per-process timing/memory events. Default dedicated teachers are unchanged.
+
+The launcher must verify the physical GPU assignment and common scheduler ownership before enabling sharing; this option does not reserve or expose a GPU. Independent Ray clusters may use the same device only inside an explicitly shared allocation. Never use independent scheduler requests to double-allocate a device. Registering an instance is not a memory-fit guarantee: profile long-context forwards and total resident VRAM before admitting more teachers. Preserve each run’s checkpoint, tokenizer, scoring mode, microbatch packing, and policy identity.
+
+Use a fresh directory for each allocation/trial; its policy is immutable. Size every participant's timeout above worst-case initialization plus the other admitted teachers' scoring time, allowing for contention. Initialization includes checkpoint loading; file locks do not promise FIFO scheduling. Teachers must not fork after admission: forked children inherit lock descriptors and can delay crash cleanup. Use spawn for subprocesses (the tested teacher path has no forked data loaders). Event-write failures fail the request closed. Shared scoring returns input tensors to CPU and releases unused allocator cache before unlocking; resident model weights remain on GPU. Failed scoring frames, including chained exceptions, are cleared before cleanup. The supervisor must terminate failed initialization workers, which retain admission until process exit because partially loaded models can remain resident. Fatal device errors also require the supervisor to stop affected workers. Admission counts worker processes; when base-reference scoring is enabled, its model shares the same worker and must be included in memory profiling.
+
+Run the CPU admission/concurrency/crash tests with `python -m unittest discover -s tests -p test_teacher_sharing.py`.
