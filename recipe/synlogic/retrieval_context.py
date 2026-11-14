@@ -15,8 +15,9 @@ def digest(path):
 
 class FrozenReferences:
     def __init__(self, manifest, expected_sha256):
-        assert digest(manifest)==expected_sha256,'Shared retrieval manifest changed'
-        self.manifest=json.loads(Path(manifest).read_text())
+        manifest_raw=Path(manifest).read_bytes()
+        assert hashlib.sha256(manifest_raw).hexdigest()==expected_sha256,'Shared retrieval manifest changed'
+        self.manifest=json.loads(manifest_raw)
         assert self.manifest['passed'] and self.manifest['d2_rows']==13505
         for path,sha in self.manifest['immutable_files'].items():
             assert digest(path)==sha,('Frozen retrieval artifact changed',path)

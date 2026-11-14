@@ -12,6 +12,12 @@ from .trainer import SynLogicTrainer
 
 class OPDTrainer(SynLogicTrainer):
     def init_workers(self):
+        settings=self.config.opd
+        if settings.get('retrieval_privilege',False):
+            target=(self.config.actor_rollout_ref.actor if settings.get('shared_current_opsd',False)
+                    else self.config.actor_rollout_ref.ref)
+            for key in ['retrieval_manifest','retrieval_manifest_sha256','retrieval_max_context']:
+                assert target[key]==settings[key],('Teacher/driver retrieval binding differs',key)
         super().init_workers()
         students = self.actor_rollout_wg.opd_device_identity()
         if self.config.opd.get('shared_current_opsd', False):
@@ -54,7 +60,8 @@ class OPDTrainer(SynLogicTrainer):
                 loss=self.config.actor_rollout_ref.actor.policy_loss
                 assert loss.beta==0 and loss.full_logit_distill and loss.top_k_distill==100 and loss.distill_add_tail and loss.jsd_token_clip==.05
                 batch.batch['outcome_advantages']=batch.batch['advantages'].detach().clone()
-                batch.batch['advantages'].zero_()
+                import torch
+                batch.batch['advantages']=torch.zeros_like(batch.batch['advantages'])
                 batch.meta_info.update(shared_current_opsd=True,opsd_policy_outer_step=int(self.global_steps),opd_loss_mode='shared_current_forward_kl')
                 from src.noise_diagnostics import snapshot_due
                 import torch

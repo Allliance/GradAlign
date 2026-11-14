@@ -180,11 +180,14 @@ class OPDActorWorker(AllocatedGPUWorker):
         if self.config.actor.get('shared_current_opsd',False):
             assert not self._is_ref and self._is_actor and self.world_size==2
             assert not self._is_offload_param and self.ulysses_sequence_parallel_size==1
+            assert self.config.actor.shared_teacher_token_budget>=self.config.actor.ppo_max_token_len_per_gpu
             self.actor.shared_teacher_callback=self._shared_teacher_forward
 
     def _shared_teacher_forward(self,micro,temperature,version):
         from .native_stats import score_native
         model=self.actor.actor_module
+        counters={int(state['step']) for state in self.actor.actor_optimizer.state.values() if 'step' in state}
+        assert counters=={int(version)} or (not counters and int(version)==0),'Teacher version differs from actual Adam update counter'
         states=[(module,module.training) for module in model.modules()]
         teacher=DataProto.from_dict(tensors={'responses':micro['responses'],
             'prompts':micro['opsd_privileged_prompts'],'input_ids':micro['opsd_privileged_input_ids'],
@@ -206,7 +209,7 @@ class OPDActorWorker(AllocatedGPUWorker):
         proof={'passed':True,'epoch':time.time(),'policy_version':int(version),'teacher_version':int(version),
                'same_actor_object':True,'stopped_gradient':True,'extra_optimizer_updates':0,
                'teacher_mode':'current actor weights refreshed before each optimizer minibatch; no shadow, EMA or lag',
-               'rank':self.rank,'valid_response_tokens':int(teacher.batch['response_mask'].sum())}
+               'actual_adam_counter':int(version),'rank':self.rank,'valid_response_tokens':int(teacher.batch['response_mask'].sum())}
         path=root/f'shared-teacher-version-rank{self.rank}.json';tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(proof));tmp.replace(path)
         from .shared_targets import record_targets
         record_targets(root,int(version),self.rank,micro,result)
@@ -246,6 +249,7 @@ class OPDActorWorker(AllocatedGPUWorker):
     def compute_log_prob(self, data):
         if self.config.actor.get('retrieval_privilege',False) and not self.config.actor.get('ta_support_k'):
             assert not any(key.startswith('opsd_privileged_') for key in data.batch.keys()), 'Privileged context entered student scoring'
+            assert not self._is_offload_param and self.ulysses_sequence_parallel_size==1
             baseline=super().compute_log_prob(data)
             if not getattr(self,'_retrieval_student_checked',False):
                 from .native_stats import score_native
