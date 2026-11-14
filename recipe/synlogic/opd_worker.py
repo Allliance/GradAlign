@@ -107,11 +107,10 @@ class OPDReferenceWorker(AllocatedGPUWorker):
         if not self.config.ref.get('ta_support_k'):
             return self._compute_original_ref_log_prob(data)
         assert self.teacher_only and self.ulysses_sequence_parallel_size==1
-        from .ta_opd import score_support
-        baseline=None if getattr(self,'_ta_scoring_checked',False) else self._compute_original_ref_log_prob(data[:2])
-        result=score_support(self.teacher_policy.actor_module,data,
-            temperature=self.config.rollout.temperature,k=int(self.config.ref.ta_support_k),
-            candidate_key='ta_student_ids')
+        from .native_stats import score_native
+        result=score_native(self.teacher_policy,data,temperature=self.config.rollout.temperature,
+            max_token_len=self.config.ref.log_prob_max_token_len_per_gpu,k=int(self.config.ref.ta_support_k),candidate_key='ta_student_ids')
+        baseline=None if getattr(self,'_ta_scoring_checked',False) else DataProto.from_dict(tensors={'teacher_log_probs':result['native_lp'][:2]})
         if baseline is not None:
             self._check_ta_alignment(data,baseline.batch['teacher_log_probs'],result['chosen_lp'][:2],'teacher')
             self._ta_scoring_checked=True
@@ -126,10 +125,10 @@ class OPDActorWorker(AllocatedGPUWorker):
         if not self.config.actor.get('ta_support_k'):
             return super().compute_log_prob(data)
         assert self.ulysses_sequence_parallel_size==1 and not self._is_offload_param
-        from .ta_opd import score_support
-        baseline=None if getattr(self,'_ta_scoring_checked',False) else super().compute_log_prob(data[:2])
-        result=score_support(self.actor.actor_module,data,
-            temperature=self.config.rollout.temperature,k=int(self.config.actor.ta_support_k),entropy=True)
+        from .native_stats import score_native
+        result=score_native(self.actor,data,temperature=self.config.rollout.temperature,
+            max_token_len=self.config.rollout.log_prob_max_token_len_per_gpu,k=int(self.config.actor.ta_support_k),entropy=True)
+        baseline=None if getattr(self,'_ta_scoring_checked',False) else DataProto.from_dict(tensors={'old_log_probs':result['native_lp'][:2]})
         if baseline is not None:
             self._check_ta_alignment(data,baseline.batch['old_log_probs'],result['chosen_lp'][:2],'student')
             self._ta_scoring_checked=True
@@ -140,9 +139,9 @@ class OPDActorWorker(AllocatedGPUWorker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ta_candidates(self,data):
         assert self.config.actor.get('ta_support_k') and self.ulysses_sequence_parallel_size==1
-        from .ta_opd import score_support
-        result=score_support(self.actor.actor_module,data,
-            temperature=self.config.rollout.temperature,k=0,candidate_key='ta_teacher_ids')
+        from .native_stats import score_native
+        result=score_native(self.actor,data,temperature=self.config.rollout.temperature,
+            max_token_len=self.config.rollout.log_prob_max_token_len_per_gpu,k=0,candidate_key='ta_teacher_ids')
         return DataProto.from_dict(tensors={'ta_student_on_teacher_lp':result['candidate_lp']})
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
