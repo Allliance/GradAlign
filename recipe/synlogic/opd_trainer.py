@@ -14,6 +14,15 @@ class OPDTrainer(SynLogicTrainer):
     def init_workers(self):
         super().init_workers()
         students = self.actor_rollout_wg.opd_device_identity()
+        if self.config.opd.get('shared_current_opsd', False):
+            assert len(students)==2 and not self.use_reference_policy
+            assert not self.config.actor_rollout_ref.actor.use_kl_loss
+            assert self.config.actor_rollout_ref.actor.shared_current_opsd
+            identities=[(s['node_id'],tuple(s['assigned'])) for s in students]
+            assert len(set(identities))==2
+            root=Path(os.environ['SYNLOGIC_RUN_ROOT'])
+            (root/'device-placement.json').write_text(json.dumps({'students':students,'teacher':'same current actor parameters; zero additional GPU/model allocation'},indent=2)+'\n')
+            return
         teacher = self.ref_policy_wg.opd_device_identity()[0]
         if len(students) != self.config.trainer.n_gpus_per_node:
             raise ValueError('Student worker count differs from the configured allocation')
@@ -29,6 +38,39 @@ class OPDTrainer(SynLogicTrainer):
 
     def _transform_advantages(self, batch, metrics):
         settings = self.config.opd
+        if settings.get('retrieval_privilege',False):
+            assert not any(settings.get(key,False) for key in ['teachability','tip','eopd'])
+            assert settings.outcome_coefficient==0 and not self.config.actor_rollout_ref.actor.use_kl_loss
+            from .retrieval_context import FrozenReferences
+            import numpy as np
+            if not hasattr(self,'_retrieval_references'):
+                self._retrieval_references=FrozenReferences(settings.retrieval_manifest,settings.retrieval_manifest_sha256)
+            entries=[self._retrieval_references.entry(extra) for extra in batch.non_tensor_batch['extra_info']]
+            for field in ['reference_question_id','reference_rollout_id','document_id']:
+                batch.non_tensor_batch['retrieval_'+field]=np.array([e[field] for e in entries],dtype=object)
+            batch.meta_info['retrieval_manifest_sha256']=settings.retrieval_manifest_sha256
+            if settings.get('shared_current_opsd',False):
+                assert self.config.actor_rollout_ref.actor.shared_current_opsd
+                loss=self.config.actor_rollout_ref.actor.policy_loss
+                assert loss.beta==0 and loss.full_logit_distill and loss.top_k_distill==100 and loss.distill_add_tail and loss.jsd_token_clip==.05
+                batch.batch['outcome_advantages']=batch.batch['advantages'].detach().clone()
+                batch.batch['advantages'].zero_()
+                batch.meta_info.update(shared_current_opsd=True,opsd_policy_outer_step=int(self.global_steps),opd_loss_mode='shared_current_forward_kl')
+                from src.noise_diagnostics import snapshot_due
+                import torch
+                capture=snapshot_due(int(self.global_steps),self.config.trainer.test_freq,self.config.trainer.total_training_steps)
+                batch.batch['opsd_capture_targets']=torch.full((len(batch),),capture,dtype=torch.bool)
+                batch.batch['opsd_snapshot_row_index']=torch.arange(len(batch),dtype=torch.long)
+                mini=self.config.actor_rollout_ref.actor.ppo_mini_batch_size*self.config.actor_rollout_ref.rollout.n
+                assert len(batch)==5*mini and self.config.actor_rollout_ref.actor.ppo_epochs==1
+                batch.batch['opsd_teacher_policy_version']=((int(self.global_steps)-1)*5+torch.arange(len(batch))//mini)
+                if capture:
+                    from .shared_targets import record_rows
+                    record_rows(os.environ['SYNLOGIC_RUN_ROOT'],int(self.global_steps),batch.non_tensor_batch['diagnostic_rollout_id'],settings.retrieval_manifest_sha256)
+                metrics.update({'opsd/shared_current_teacher':1.,'opsd/frozen_teacher':0.,'opsd/teacher_gpu_count':0.,
+                                'opsd/teacher_top_k':100.,'opsd/vocabulary_clip':.05,'opsd/teacher_refresh_each_optimizer_minibatch':1.,
+                                'opsd/reference_kl_coefficient':0.,'opsd/outcome_coefficient':0.})
+                return batch
         if settings.get('oracle_opsd',False):
             assert self.config.actor_rollout_ref.actor.oracle_opsd
             loss=self.config.actor_rollout_ref.actor.policy_loss

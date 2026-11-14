@@ -22,8 +22,9 @@ def runtime_env_vars():
 @hydra.main(config_path=str(Path(os.environ['SYNLOGIC_FRAMEWORK_CODE']) / 'src/config'),
             config_name='dapo_trainer', version_base=None)
 def main(config):
+    shared_opsd = config.get('opd', {}).get('shared_current_opsd', False)
     gpus = (config.trainer.n_gpus_per_node + 1
-            if config.get('opd', {}).get('enabled', False) else config.trainer.n_gpus_per_node)
+            if config.get('opd', {}).get('enabled', False) and not shared_opsd else config.trainer.n_gpus_per_node)
     # Full-gradient selection broadcasts several copies of a 16-response batch.
     # Keep these objects in shared memory instead of spilling to local disk.
     object_store_gib = 48 if config.mixture.condition == 'mixture-gradalign' else 8
@@ -63,6 +64,7 @@ class TaskRunner:
         OmegaConf.resolve(config)
         tokenizer = verify_base_template(hf_tokenizer(config.actor_rollout_ref.model.path))
         opd_enabled = config.get('opd', {}).get('enabled', False)
+        shared_opsd = config.get('opd', {}).get('shared_current_opsd', False)
         from .input_contract import verify_contract
         guard = verify_contract(config.provenance.input_contract,
                                 config.data.train_files, config.data.val_files)
@@ -74,9 +76,14 @@ class TaskRunner:
                        if config.mixture.condition == 'mixture-gradalign' else ActorRolloutRefWorker)
         roles = {Role.ActorRollout: ray.remote(actor_class),
                  Role.RefPolicy: ray.remote(OPDReferenceWorker if opd_enabled else ActorRolloutRefWorker)}
-        pools = ({'student': [config.trainer.n_gpus_per_node], 'teacher_reference': [1]}
+        if shared_opsd:
+            assert config.trainer.n_gpus_per_node == 2
+            roles.pop(Role.RefPolicy)
+        pools = ({'student': [config.trainer.n_gpus_per_node]} if shared_opsd else
+                 {'student': [config.trainer.n_gpus_per_node], 'teacher_reference': [1]}
                  if opd_enabled else {'training': [config.trainer.n_gpus_per_node]})
-        mapping = ({Role.ActorRollout: 'student', Role.RefPolicy: 'teacher_reference'} if opd_enabled
+        mapping = ({Role.ActorRollout: 'student'} if shared_opsd else
+                   {Role.ActorRollout: 'student', Role.RefPolicy: 'teacher_reference'} if opd_enabled
                    else {role: 'training' for role in roles})
         manager = ResourcePoolManager(resource_pool_spec=pools, mapping=mapping)
         reward_args = dict(tokenizer=tokenizer, num_examine=0, reward_fn_key=config.data.reward_fn_key,

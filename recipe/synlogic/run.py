@@ -83,15 +83,20 @@ def overrides(root, condition, framework, gpus):
             result.append(value)
     result += [key + '=' + value for key, value in replacements.items()]
     metadata = json.loads((root / 'runs' / condition / 'portable-provenance.json').read_text())
+    shared_opsd = metadata.get('opd',{}).get('shared_current_opsd',False)
     if opd:
         if gpus not in (2, 3):
             raise ValueError('OPD requires one or two student GPUs and one teacher-reference GPU')
         values_by_key = {v.split('=', 1)[0].lstrip('+'): i for i, v in enumerate(result)}
-        for key, value in {'trainer.n_gpus_per_node': str(gpus - 1),
-                           'actor_rollout_ref.actor.fsdp_config.fsdp_size': str(gpus - 1)}.items():
+        student_gpus = gpus if shared_opsd else gpus - 1
+        if shared_opsd and gpus != 2:
+            raise ValueError('Current-weight shared OPSD has exactly two total GPUs')
+        for key, value in {'trainer.n_gpus_per_node': str(student_gpus),
+                           'actor_rollout_ref.actor.fsdp_config.fsdp_size': str(student_gpus)}.items():
             result[values_by_key[key]] = key + '=' + value
         result += ['+opd.' + key + '=' + override_value(value) for key, value in metadata['opd'].items()]
-        result += ['+actor_rollout_ref.ref.teacher_model_path=' + metadata['teacher_model_path']]
+        if not shared_opsd:
+            result += ['+actor_rollout_ref.ref.teacher_model_path=' + metadata['teacher_model_path']]
         result += ['+data.apply_chat_template_kwargs.enable_thinking=False']
         result += ['+data.base_generation_prompt=True']
     result = [v if not v.startswith('trainer.experiment_name=') else 'trainer.experiment_name=' + metadata.get('experiment_name', v.split('=', 1)[1]) for v in result]

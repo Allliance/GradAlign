@@ -125,6 +125,20 @@ class OPDReferenceWorker(AllocatedGPUWorker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data):
+        if self.config.ref.get('retrieval_privilege',False):
+            from .retrieval_context import FrozenReferences,privileged_batch
+            from .native_stats import score_native
+            if not hasattr(self,'_retrieval_references'):
+                from transformers import AutoTokenizer
+                self._retrieval_references=FrozenReferences(self.config.ref.retrieval_manifest,self.config.ref.retrieval_manifest_sha256)
+                self._retrieval_tokenizer=AutoTokenizer.from_pretrained(self.config.ref.teacher_model_path,local_files_only=True)
+            privileged=privileged_batch(data,self._retrieval_tokenizer,self._retrieval_references,self.config.ref.retrieval_max_context)
+            result=score_native(self.teacher_policy,privileged,temperature=self.config.rollout.temperature,
+                                max_token_len=self.config.ref.log_prob_max_token_len_per_gpu,k=0)
+            if not getattr(self,'_retrieval_scoring_checked',False):
+                self._check_ta_alignment(privileged,result['native_lp'][:2],result['chosen_lp'][:2],'retrieval-privileged-teacher')
+                self._retrieval_scoring_checked=True
+            return DataProto.from_dict(tensors={'teacher_log_probs':result['chosen_lp']})
         if self.config.ref.get('oracle_opsd',False):
             from .oracle_opsd import load_oracle_map,privileged_batch
             from .native_stats import score_native
@@ -161,6 +175,58 @@ class OPDReferenceWorker(AllocatedGPUWorker):
 
 class OPDActorWorker(AllocatedGPUWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        super().init_model()
+        if self.config.actor.get('shared_current_opsd',False):
+            assert not self._is_ref and self._is_actor and self.world_size==2
+            assert not self._is_offload_param and self.ulysses_sequence_parallel_size==1
+            self.actor.shared_teacher_callback=self._shared_teacher_forward
+
+    def _shared_teacher_forward(self,micro,temperature,version):
+        from .native_stats import score_native
+        model=self.actor.actor_module
+        states=[(module,module.training) for module in model.modules()]
+        teacher=DataProto.from_dict(tensors={'responses':micro['responses'],
+            'prompts':micro['opsd_privileged_prompts'],'input_ids':micro['opsd_privileged_input_ids'],
+            'attention_mask':micro['opsd_privileged_attention_mask'],'position_ids':micro['opsd_privileged_position_ids'],
+            'response_mask':micro['attention_mask'][:,-micro['responses'].shape[1]:]})
+        try:
+            devices=[torch.cuda.current_device()] if torch.cuda.is_available() else []
+            with torch.random.fork_rng(devices=devices),torch.no_grad():
+                result=score_native(self.actor,teacher,temperature=temperature,
+                    max_token_len=self.config.actor.shared_teacher_token_budget,k=100,single_micro_batch=True)
+        finally:
+            for module,training in states:module.training=training
+        assert all(not value.requires_grad for value in result.values())
+        if 'opsd_teacher_policy_version' in micro:
+            assert (micro['opsd_teacher_policy_version']==version).all(),'Journal version differs from actual current minibatch version'
+        from pathlib import Path
+        import json,time
+        root=Path(os.environ['SYNLOGIC_RUN_ROOT'])
+        proof={'passed':True,'epoch':time.time(),'policy_version':int(version),'teacher_version':int(version),
+               'same_actor_object':True,'stopped_gradient':True,'extra_optimizer_updates':0,
+               'teacher_mode':'current actor weights refreshed before each optimizer minibatch; no shadow, EMA or lag',
+               'rank':self.rank,'valid_response_tokens':int(teacher.batch['response_mask'].sum())}
+        path=root/f'shared-teacher-version-rank{self.rank}.json';tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(proof));tmp.replace(path)
+        from .shared_targets import record_targets
+        record_targets(root,int(version),self.rank,micro,result)
+        return {'opsd_teacher_ids':result['ids'].to(micro['responses'].device,dtype=torch.int32),
+                'opsd_teacher_lp':result['lp'].to(micro['responses'].device),
+                'teacher_log_probs':result['chosen_lp'].to(micro['responses'].device)}
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def update_actor(self,data):
+        if self.config.actor.get('shared_current_opsd',False):
+            from .retrieval_context import FrozenReferences,privileged_batch
+            if not hasattr(self,'_retrieval_references'):
+                self._retrieval_references=FrozenReferences(self.config.actor.retrieval_manifest,self.config.actor.retrieval_manifest_sha256)
+            teacher=privileged_batch(data,self.tokenizer,self._retrieval_references,self.config.actor.retrieval_max_context)
+            for key in ['prompts','input_ids','attention_mask','position_ids']:
+                data.batch['opsd_privileged_'+key]=teacher.batch[key]
+            assert data.meta_info['shared_current_opsd'] and int(data.meta_info['opsd_policy_outer_step'])>=1
+        return super().update_actor(data)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_tip_student_head(self):
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
         model=self.actor.actor_module
@@ -178,6 +244,16 @@ class OPDActorWorker(AllocatedGPUWorker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data):
+        if self.config.actor.get('retrieval_privilege',False) and not self.config.actor.get('ta_support_k'):
+            assert not any(key.startswith('opsd_privileged_') for key in data.batch.keys()), 'Privileged context entered student scoring'
+            baseline=super().compute_log_prob(data)
+            if not getattr(self,'_retrieval_student_checked',False):
+                from .native_stats import score_native
+                result=score_native(self.actor,data[:2],temperature=self.config.rollout.temperature,
+                                    max_token_len=self.config.rollout.log_prob_max_token_len_per_gpu,k=0)
+                self._check_ta_alignment(data[:2],baseline.batch['old_log_probs'][:2],result['chosen_lp'],'retrieval-unprivileged-student')
+                self._retrieval_student_checked=True
+            return baseline
         if not self.config.actor.get('ta_support_k'):
             return super().compute_log_prob(data)
         assert self.ulysses_sequence_parallel_size==1 and not self._is_offload_param

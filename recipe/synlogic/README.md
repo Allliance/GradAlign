@@ -61,3 +61,23 @@ python recipe/synlogic/test_sampling.py
 SYNLOGIC_FRAMEWORK_CODE="$FRAMEWORK_CODE" \
   torchrun --standalone --nproc-per-node=4 recipe/synlogic/test_alignment.py
 ```
+
+Retrieved worked-reference distillation binds one immutable mapping manifest to
+every launch and full-state checkpoint. `opd.retrieval_privilege` changes only
+the teacher context; student generation and updates retain original prompts and
+response IDs. The manifest must cover the frozen D2 rows and hash its mapping
+payload. Training-corpus overlap policy belongs to the recorded protocol;
+held-out benchmark examples remain excluded from corpus curation and training.
+
+`opd.shared_current_opsd` uses exactly two total actor GPUs and no reference
+worker, teacher copy, shadow, EMA or lag. A stopped-gradient privileged forward
+uses the actor's current parameters before each optimizer minibatch. Five
+minibatches per outer step use versions `5 * (outer_step - 1) + j`; teacher
+forwards preserve RNG, mode and accumulated gradients. The direct objective is
+the pinned RLCSD teacher-top100 plus tail forward KL with contribution upper
+clamp0.05. No PPO, outcome advantage or additional reference KL enters it.
+Execution microbatches are synchronized across DP ranks using the combined
+student/teacher token load; each performs exactly one teacher forward. Original
+global student response-token weighting is preserved. Sparse pre-evaluation
+target journals retain the exact supports, probabilities and policy versions
+separately from prunable checkpoints.

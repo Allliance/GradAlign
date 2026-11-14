@@ -4,12 +4,19 @@ import torch
 
 
 @torch.no_grad()
-def score_native(policy,data,temperature,max_token_len,k=16,candidate_key=None,entropy=False):
+def score_native(policy,data,temperature,max_token_len,k=16,candidate_key=None,entropy=False,single_micro_batch=False):
     from verl.utils.seqlen_balancing import rearrange_micro_batches,get_reverse_idx
     assert not policy.use_fused_kernels and not policy.use_ulysses_sp and temperature>0
     model=policy.actor_module;model.eval();device=next(model.parameters()).device
     wrapped=model.module if hasattr(model,'module') else model
-    microbatches,indices=rearrange_micro_batches(batch=data.batch,max_token_len=max_token_len)
+    if single_micro_batch:
+        # A shared FSDP actor has already synchronized the outer microbatch
+        # plan across DP ranks using both privileged and student token loads.
+        # Do not create a second rank-dependent sequence of all-gathers here.
+        assert data.batch['attention_mask'].sum()<=max_token_len
+        microbatches,indices=[data.batch],[list(range(len(data)))]
+    else:
+        microbatches,indices=rearrange_micro_batches(batch=data.batch,max_token_len=max_token_len)
     names=['chosen_lp','native_lp']+(['ids','lp'] if k else [])+(['candidate_lp'] if candidate_key else [])+(['entropy'] if entropy else [])
     parts={key:[] for key in names}
     for micro in microbatches:
