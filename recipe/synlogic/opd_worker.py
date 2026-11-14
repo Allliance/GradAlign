@@ -77,6 +77,8 @@ class OPDReferenceWorker(AllocatedGPUWorker):
             'tip_fkl':out['fkl'],'teacher_log_probs':out['native_teacher_lp']})
 
     def __init__(self, config, role):
+        if config.ref.get('teacher_sharing') and os.environ.get('SYNLOGIC_TEACHER_PACKED') != '1':
+            raise ValueError('Packed teacher requires explicit execution intent')
         config = deepcopy(config)
         with open_dict(config.actor):
             config.actor.ulysses_sequence_parallel_size = 1
@@ -239,3 +241,15 @@ class OPDActorWorker(AllocatedGPUWorker):
             torch.cuda.set_rng_state(cuda_rng)
         assert counters == [float(v['step']) for v in optimizer.state.values() if 'step' in v]
         return output
+
+
+# The packed launch is a source-level contract; a setup hook is only a verifier.
+if os.environ.get('SYNLOGIC_TEACHER_PACKED') == '1':
+    import hashlib
+    from pathlib import Path
+    from verl.single_controller.base.decorator import MAGIC_ATTR
+    helper = Path(__file__).with_name('teacher_sharing.py')
+    if hashlib.sha256(helper.read_bytes()).hexdigest() != os.environ['SYNLOGIC_TEACHER_SHARING_SHA256']:
+        raise ValueError('Packed teacher helper differs from the pinned launch')
+    from .teacher_sharing import wrap_teacher_worker
+    OPDReferenceWorker = wrap_teacher_worker(OPDReferenceWorker, registered_attribute=MAGIC_ATTR, required=True)
