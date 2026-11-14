@@ -45,6 +45,30 @@ class OPDTrainer(SynLogicTrainer):
             batch.meta_info.update(opd_loss_mode=self.config.actor_rollout_ref.actor.get('opd_loss_mode', 'importance_sampling'),opd_teacher_coefficient=coefficient,
                                    opd_outcome_coefficient=float(settings.outcome_coefficient))
             metrics.update(values)
+            if settings.get('position_weighted', False):
+                import torch
+                from verl.trainer.ppo.position_weighting import response_position_weights
+                assert settings.outcome_coefficient == 0 and coefficient == 1
+                assert self.config.actor_rollout_ref.actor.pw_opd
+                weights = response_position_weights(batch.batch['response_mask'])
+                batch.batch['pw_opd_weights'] = weights
+                batch.batch['pw_opd_effective_advantages'] = (combined * weights).detach()
+                mask = batch.batch['response_mask'].bool()
+                valid = mask.float()
+                relative = (valid.cumsum(-1) - .5) / valid.sum(-1, keepdim=True).clamp_min(1)
+                head, tail = mask & (relative <= .30), mask & (relative >= .70)
+                metrics.update({'pw_opd/valid_tokens':int(mask.sum()),
+                    'pw_opd/valid_rows':int(mask.any(-1).sum()),
+                    'pw_opd/weight_sum':float(weights.sum()),
+                    'pw_opd/head_tokens':int(head.sum()),'pw_opd/tail_tokens':int(tail.sum()),
+                    'pw_opd/head_weight_sum':float(weights[head].sum()),
+                    'pw_opd/tail_weight_sum':float(weights[tail].sum()),
+                    'pw_opd/weighted_rkl_sum':float((-(dense * weights))[mask].sum())})
+                if mask.any():
+                    metrics.update({'pw_opd/weight_mean':float(weights[mask].mean()),
+                        'pw_opd/weight_min':float(weights[mask].min()),
+                        'pw_opd/weight_max':float(weights[mask].max()),
+                        'pw_opd/weighted_rkl':float((-(dense * weights))[mask].mean())})
             return batch
         path = Path(settings.calibration_file)
         if not settings.calibrate and not path.exists():
