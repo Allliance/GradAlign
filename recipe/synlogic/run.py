@@ -149,7 +149,7 @@ def main():
             raise ValueError('Recovery checkpoint has not been validated')
         settings += ['trainer.val_before_train=False']
     elif (args.condition in ('teacher-distillation', 'noise50-teacher-distillation')
-          and not json.loads((run / 'portable-provenance.json').read_text()).get('fresh_from_base', False)):
+          and not json.loads((run / 'portable-provenance.json').read_text()).get('fresh_from_pretrained', False)):
         metadata = json.loads((run / 'portable-provenance.json').read_text())
         source = Path(metadata['initial_checkpoint'])
         if not (source / 'validated.json').exists():
