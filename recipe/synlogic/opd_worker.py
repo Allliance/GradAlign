@@ -228,8 +228,12 @@ class OPDActorWorker(AllocatedGPUWorker):
                 self._retrieval_references=FrozenReferences(self.config.actor.retrieval_manifest,self.config.actor.retrieval_manifest_sha256)
                 self._context_budgets=ContextBudgets(self.config.actor.context_budget_path,self.config.actor.context_budget_sha256,self._retrieval_references)
             teacher=privileged_batch(data,self.tokenizer,self._retrieval_references,self.config.actor.retrieval_max_context,self._context_budgets)
-            for key in ['prompts','input_ids','attention_mask','position_ids']:
-                data.batch['opsd_privileged_'+key]=teacher.batch[key]
+            # Ray deserialization consolidates TensorDict storage. Adding new
+            # tensors would leave stale storage offsets used by the CPU cast.
+            from tensordict import TensorDict
+            data.batch=TensorDict({**dict(data.batch.items()),
+                **{'opsd_privileged_'+key:teacher.batch[key] for key in ['prompts','input_ids','attention_mask','position_ids']}},
+                batch_size=data.batch.batch_size)
             assert data.meta_info['shared_current_opsd'] and int(data.meta_info['opsd_policy_outer_step'])>=1
         return super().update_actor(data)
 
