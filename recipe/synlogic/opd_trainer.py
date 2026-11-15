@@ -16,7 +16,7 @@ class OPDTrainer(SynLogicTrainer):
         if settings.get('retrieval_privilege',False):
             target=(self.config.actor_rollout_ref.actor if settings.get('shared_current_opsd',False)
                     else self.config.actor_rollout_ref.ref)
-            for key in ['retrieval_manifest','retrieval_manifest_sha256','retrieval_max_context']:
+            for key in ['retrieval_manifest','retrieval_manifest_sha256','retrieval_max_context','context_budget_path','context_budget_sha256']:
                 assert target[key]==settings[key],('Teacher/driver retrieval binding differs',key)
         super().init_workers()
         students = self.actor_rollout_wg.opd_device_identity()
@@ -41,6 +41,21 @@ class OPDTrainer(SynLogicTrainer):
             raise ValueError('OPD roles landed on the same physical GPU')
         root = Path(os.environ['SYNLOGIC_RUN_ROOT'])
         (root/'device-placement.json').write_text(json.dumps({'students':students,'teacher':teacher},indent=2)+'\n')
+
+    def _prepare_generation(self, batch, generation):
+        if not self.config.opd.get('retrieval_privilege',False):
+            return
+        from .retrieval_context import FrozenReferences,ContextBudgets
+        import numpy as np
+        settings=self.config.opd
+        if not hasattr(self,'_generation_context_budgets'):
+            self._generation_references=FrozenReferences(settings.retrieval_manifest,settings.retrieval_manifest_sha256)
+            self._generation_context_budgets=ContextBudgets(settings.context_budget_path,settings.context_budget_sha256,self._generation_references)
+        mask=generation.batch['attention_mask'].bool()
+        budgets=[self._generation_context_budgets.budget(extra,generation.batch['input_ids'][i,mask[i]].tolist(),self.tokenizer,self._generation_references)
+                 for i,extra in enumerate(batch.non_tensor_batch['extra_info'])]
+        generation.non_tensor_batch['response_token_budget']=np.asarray(budgets,dtype=np.int64)
+        generation.meta_info['context_budget_sha256']=settings.context_budget_sha256
 
     def _transform_advantages(self, batch, metrics):
         settings = self.config.opd

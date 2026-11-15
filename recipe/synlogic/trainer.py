@@ -87,6 +87,7 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
             state['teacher_fingerprint'] = self.config.opd.teacher_fingerprint
             if self.config.opd.get('retrieval_privilege',False):
                 state['retrieval_manifest_sha256']=self.config.opd.retrieval_manifest_sha256
+                state['context_budget_sha256']=self.config.opd.context_budget_sha256
                 state['teacher_mode']='shared_current' if self.config.opd.get('shared_current_opsd',False) else 'frozen_mid360'
         path = folder / 'experiment_state.json'
         temporary = path.with_suffix('.tmp')
@@ -113,6 +114,8 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
                     expected_mode='shared_current' if self.config.opd.get('shared_current_opsd',False) else 'frozen_mid360'
                     if state.get('retrieval_manifest_sha256')!=self.config.opd.retrieval_manifest_sha256 or state.get('teacher_mode')!=expected_mode:
                         raise ValueError('Checkpoint frozen retrieval map or teacher version semantics differ')
+                    if state.get('context_budget_sha256')!=self.config.opd.context_budget_sha256:
+                        raise ValueError('Checkpoint generation context policy differs')
                 if (state.get('teacher_fingerprint', self.config.opd.teacher_fingerprint) != self.config.opd.teacher_fingerprint
                         or state.get('initial_source_step', self.config.opd.get('source_step', 300)) != self.config.opd.get('source_step', 300)):
                     raise ValueError('Checkpoint distillation source differs')

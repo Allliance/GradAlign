@@ -73,6 +73,8 @@ class OPDReferenceWorker(AllocatedGPUWorker):
         return DataProto.from_dict(tensors={'tip_entropy':out['entropy'],'tip_rkl':out['rkl'],'tip_fkl':out['fkl']})
 
     def __init__(self, config, role):
+        if config.ref.get('teacher_sharing') and os.environ.get('SYNLOGIC_TEACHER_PACKED') != '1':
+            raise ValueError('Packed teacher requires explicit execution intent')
         config = deepcopy(config)
         with open_dict(config.actor):
             config.actor.ulysses_sequence_parallel_size = 1
@@ -126,13 +128,14 @@ class OPDReferenceWorker(AllocatedGPUWorker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_ref_log_prob(self, data):
         if self.config.ref.get('retrieval_privilege',False):
-            from .retrieval_context import FrozenReferences,privileged_batch
+            from .retrieval_context import FrozenReferences,ContextBudgets,privileged_batch
             from .native_stats import score_native
             if not hasattr(self,'_retrieval_references'):
                 from transformers import AutoTokenizer
                 self._retrieval_references=FrozenReferences(self.config.ref.retrieval_manifest,self.config.ref.retrieval_manifest_sha256)
+                self._context_budgets=ContextBudgets(self.config.ref.context_budget_path,self.config.ref.context_budget_sha256,self._retrieval_references)
                 self._retrieval_tokenizer=AutoTokenizer.from_pretrained(self.config.ref.teacher_model_path,local_files_only=True)
-            privileged=privileged_batch(data,self._retrieval_tokenizer,self._retrieval_references,self.config.ref.retrieval_max_context)
+            privileged=privileged_batch(data,self._retrieval_tokenizer,self._retrieval_references,self.config.ref.retrieval_max_context,self._context_budgets)
             result=score_native(self.teacher_policy,privileged,temperature=self.config.rollout.temperature,
                                 max_token_len=self.config.ref.log_prob_max_token_len_per_gpu,k=0)
             if not getattr(self,'_retrieval_scoring_checked',False):
@@ -220,10 +223,11 @@ class OPDActorWorker(AllocatedGPUWorker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self,data):
         if self.config.actor.get('shared_current_opsd',False):
-            from .retrieval_context import FrozenReferences,privileged_batch
+            from .retrieval_context import FrozenReferences,ContextBudgets,privileged_batch
             if not hasattr(self,'_retrieval_references'):
                 self._retrieval_references=FrozenReferences(self.config.actor.retrieval_manifest,self.config.actor.retrieval_manifest_sha256)
-            teacher=privileged_batch(data,self.tokenizer,self._retrieval_references,self.config.actor.retrieval_max_context)
+                self._context_budgets=ContextBudgets(self.config.actor.context_budget_path,self.config.actor.context_budget_sha256,self._retrieval_references)
+            teacher=privileged_batch(data,self.tokenizer,self._retrieval_references,self.config.actor.retrieval_max_context,self._context_budgets)
             for key in ['prompts','input_ids','attention_mask','position_ids']:
                 data.batch['opsd_privileged_'+key]=teacher.batch[key]
             assert data.meta_info['shared_current_opsd'] and int(data.meta_info['opsd_policy_outer_step'])>=1
@@ -322,3 +326,15 @@ class OPDActorWorker(AllocatedGPUWorker):
             torch.cuda.set_rng_state(cuda_rng)
         assert counters == [float(v['step']) for v in optimizer.state.values() if 'step' in v]
         return output
+
+
+# The packed launch is a source-level contract; a setup hook is only a verifier.
+if os.environ.get('SYNLOGIC_TEACHER_PACKED') == '1':
+    import hashlib
+    from pathlib import Path
+    from verl.single_controller.base.decorator import MAGIC_ATTR
+    helper = Path(__file__).with_name('teacher_sharing.py')
+    if hashlib.sha256(helper.read_bytes()).hexdigest() != os.environ['SYNLOGIC_TEACHER_SHARING_SHA256']:
+        raise ValueError('Packed teacher helper differs from the pinned launch')
+    from .teacher_sharing import wrap_teacher_worker
+    OPDReferenceWorker = wrap_teacher_worker(OPDReferenceWorker, registered_attribute=MAGIC_ATTR, required=True)
