@@ -41,4 +41,43 @@ class WorkerSharingTests(unittest.TestCase):
              w._teacher_sharing.close();other._teacher_sharing.close()
 
 
+    def test_mandatory_mount_policy_and_directory(self):
+        fake_omega=types.SimpleNamespace(OmegaConf=types.SimpleNamespace(to_container=lambda x,**kw:x))
+        with patch.dict(sys.modules,{'omegaconf':fake_omega}):
+            with self.assertRaisesRegex(ValueError,'explicit immutable'):
+                s._sharing(None,types.SimpleNamespace(ref={}),required=True)
+            config=types.SimpleNamespace(ref={'teacher_sharing':{'directory':'/run/teacher-sharing','instance_id':'required'}})
+            with patch.object(s.os.path,'ismount',return_value=False),patch.object(s.Path,'read_text',return_value=''):
+                with self.assertRaisesRegex(ValueError,'host-local sharing'):
+                    s._sharing(None,config,required=True)
+            config.ref['teacher_sharing']['directory']='/tmp/foreign'
+            with patch.object(s.os.path,'ismount',return_value=True):
+                with self.assertRaisesRegex(ValueError,'inside the sharing'):
+                    s._sharing(None,config,required=True)
+
+    def test_mandatory_type_world_size_and_cpu_arguments(self):
+        cuda=types.SimpleNamespace(synchronize=lambda:None,empty_cache=lambda:None,reset_peak_memory_stats=lambda:None,max_memory_allocated=lambda:0,max_memory_reserved=lambda:0,memory_allocated=lambda:0,memory_reserved=lambda:0)
+        class Tensor:
+            def __init__(self,device):self.device=types.SimpleNamespace(type=device)
+        torch=types.SimpleNamespace(cuda=cuda,is_tensor=lambda x:isinstance(x,Tensor))
+        class Worker:
+            def __init__(self,config,role):self.world_size=config.world_size;self.called=False
+            def init_model(self):pass
+            def compute_ref_log_prob(self,value):self.called=True;return 1
+        s.wrap_teacher_worker(Worker,required=True)
+        with tempfile.TemporaryDirectory() as d,patch.dict(sys.modules,{'torch':torch}):
+            gates=[]
+            def gate(worker,config,required=False):
+                value=s.TeacherGPUSharing(d,str(config.world_size));gates.append(value);return value
+            with patch.object(s,'_sharing',gate):
+                class Subclass(Worker):pass
+                with self.assertRaisesRegex(TypeError,'subclass'):Subclass(types.SimpleNamespace(world_size=1),'ref')
+                with self.assertRaisesRegex(ValueError,'one distributed rank'):Worker(types.SimpleNamespace(world_size=2),'ref')
+                worker=Worker(types.SimpleNamespace(world_size=1),'ref')
+                with self.assertRaisesRegex(ValueError,'arrive on CPU'):worker.compute_ref_log_prob({'x':[Tensor('cuda')]})
+                self.assertFalse(worker.called)
+                self.assertEqual(worker.compute_ref_log_prob(Tensor('cpu')),1)
+                for gate in gates:gate.close()
+
+
 if __name__=='__main__': unittest.main()
