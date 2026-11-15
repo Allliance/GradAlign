@@ -117,6 +117,9 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
     def _validate(self):
         self.val_reward_fn.records.clear()
         metrics = super()._validate()
+        # Preserve native generation/scoring; expose only the versioned label-task masks.
+        if self.config.trainer.get('label_only_reporting', False):
+            metrics = {key: value for key, value in metrics.items() if not key.startswith('val')}
         records = self.val_reward_fn.records
         if len(records) != 270 * 8:
             raise ValueError('Validation response count changed')
