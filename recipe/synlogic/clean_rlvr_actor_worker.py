@@ -16,6 +16,13 @@ class CleanRLVRActorWorker(ActorRolloutRefWorker):
     def update_actor(self, data):
         # Scoring can leave large unused cached blocks immediately before FSDP
         # backward. Release only those blocks; tensors and optimizer math stay.
+        threshold = self.config.actor.get("allocator_gc_threshold")
+        if threshold is not None:
+            if not 0.0 < threshold < 1.0:
+                raise ValueError("allocator_gc_threshold must be between zero and one")
+            torch.cuda.memory._set_allocator_settings(
+                f"max_split_size_mb:256,garbage_collection_threshold:{threshold}"
+            )
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
         return super().update_actor(data)
