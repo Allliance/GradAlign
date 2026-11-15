@@ -70,7 +70,26 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
                                                  num_workers=0, drop_last=True,
                                                  collate_fn=original.collate_fn, sampler=sampler)
 
+    def _balance_batch(self, batch, metrics, logging_prefix="global_seqlen"):
+        reference_dp = self.config.mixture.get('canonical_reference_dp')
+        if reference_dp is None:
+            return super()._balance_batch(batch, metrics, logging_prefix)
+        from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
+        lengths = batch.batch['attention_mask'].view(len(batch), -1).sum(-1).tolist()
+        partitions = get_seqlen_balanced_partitions(lengths, k_partitions=reference_dp, equal_size=True)
+        batch.reorder(torch.tensor([row for partition in partitions for row in partition]))
+        metrics.update(log_seqlen_unbalance(seqlen_list=lengths, partitions=partitions, prefix=logging_prefix))
+
     def _actor_update_batch(self, batch):
+        reference_dp = self.config.mixture.get('canonical_reference_dp')
+        if reference_dp is not None:
+            if not self.config.trainer.balance_batch or self.config.get('opd', {}).get('enabled', False):
+                raise ValueError('Historical rank-local dispatch requires original balancing and no OPD')
+            from .parallelism import prepare_rank_local_legacy_actor_batch
+            minibatch = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+            dp = self.actor_rollout_wg.world_size // self.config.actor_rollout_ref.actor.ulysses_sequence_parallel_size
+            return prepare_rank_local_legacy_actor_batch(batch, minibatch, dp, reference_dp,
+                                                        self.config.mixture.legacy_microbatch_token_budget)
         if not self.config.mixture.get('preserve_global_minibatches', False):
             return super()._actor_update_batch(batch)
         if self.config.trainer.balance_batch or self.config.get('opd', {}).get('enabled', False):
