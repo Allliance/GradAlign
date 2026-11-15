@@ -146,7 +146,8 @@ class OPDReferenceWorker(AllocatedGPUWorker):
                     self._retrieval_tokenizer=AutoTokenizer.from_pretrained(self.config.ref.teacher_model_path,local_files_only=True)
                 privileged=privileged_batch(data,self._retrieval_tokenizer,self._retrieval_references,self.config.ref.retrieval_max_context,self._context_budgets)
             result=score_native(self.teacher_policy,privileged,temperature=self.config.rollout.temperature,
-                                max_token_len=self.config.ref.log_prob_max_token_len_per_gpu,k=0)
+                                max_token_len=self.config.ref.log_prob_max_token_len_per_gpu,k=0,
+                                valid_length_planning=bool(self.config.ref.get('prefix_cache_path')))
             if not getattr(self,'_retrieval_scoring_checked',False):
                 self._check_ta_alignment(privileged,result['native_lp'][:2],result['chosen_lp'][:2],'retrieval-privileged-teacher')
                 self._retrieval_scoring_checked=True
