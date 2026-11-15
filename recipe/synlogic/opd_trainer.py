@@ -18,6 +18,9 @@ class OPDTrainer(SynLogicTrainer):
                     else self.config.actor_rollout_ref.ref)
             for key in ['retrieval_manifest','retrieval_manifest_sha256','retrieval_max_context','context_budget_path','context_budget_sha256']:
                 assert target[key]==settings[key],('Teacher/driver retrieval binding differs',key)
+            for key in ['prefix_cache_path', 'prefix_cache_sha256']:
+                if settings.get(key):
+                    assert target[key] == settings[key], ('Teacher/driver prefix binding differs', key)
         super().init_workers()
         students = self.actor_rollout_wg.opd_device_identity()
         if self.config.opd.get('shared_current_opsd', False):
@@ -44,6 +47,19 @@ class OPDTrainer(SynLogicTrainer):
 
     def _prepare_generation(self, batch, generation):
         if not self.config.opd.get('retrieval_privilege',False):
+            return
+        settings = self.config.opd
+        if settings.get('prefix_cache_path'):
+            from .prefix_cache import FrozenPrefixes
+            import numpy as np
+            if not hasattr(self, '_generation_prefix_cache'):
+                self._generation_prefix_cache = FrozenPrefixes(settings.prefix_cache_path,
+                    settings.prefix_cache_sha256, settings.retrieval_manifest_sha256,
+                    settings.context_budget_sha256)
+            generation.non_tensor_batch['response_token_budget'] = np.asarray([
+                self._generation_prefix_cache.budget(extra)
+                for extra in batch.non_tensor_batch['extra_info']], dtype=np.int64)
+            generation.meta_info['context_budget_sha256'] = settings.context_budget_sha256
             return
         from .retrieval_context import FrozenReferences,ContextBudgets
         import numpy as np

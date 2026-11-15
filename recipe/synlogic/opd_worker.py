@@ -130,12 +130,21 @@ class OPDReferenceWorker(AllocatedGPUWorker):
         if self.config.ref.get('retrieval_privilege',False):
             from .retrieval_context import FrozenReferences,ContextBudgets,privileged_batch
             from .native_stats import score_native
-            if not hasattr(self,'_retrieval_references'):
-                from transformers import AutoTokenizer
-                self._retrieval_references=FrozenReferences(self.config.ref.retrieval_manifest,self.config.ref.retrieval_manifest_sha256)
-                self._context_budgets=ContextBudgets(self.config.ref.context_budget_path,self.config.ref.context_budget_sha256,self._retrieval_references)
-                self._retrieval_tokenizer=AutoTokenizer.from_pretrained(self.config.ref.teacher_model_path,local_files_only=True)
-            privileged=privileged_batch(data,self._retrieval_tokenizer,self._retrieval_references,self.config.ref.retrieval_max_context,self._context_budgets)
+            if self.config.ref.get('prefix_cache_path'):
+                from .prefix_cache import FrozenPrefixes, privileged_batch_cached
+                if not hasattr(self, '_prefix_cache'):
+                    self._prefix_cache = FrozenPrefixes(self.config.ref.prefix_cache_path,
+                        self.config.ref.prefix_cache_sha256, self.config.ref.retrieval_manifest_sha256,
+                        self.config.ref.context_budget_sha256)
+                privileged = privileged_batch_cached(data, self._prefix_cache,
+                    self._prefix_cache.manifest['pad_token_id'], self.config.ref.retrieval_max_context)
+            else:
+                if not hasattr(self,'_retrieval_references'):
+                    from transformers import AutoTokenizer
+                    self._retrieval_references=FrozenReferences(self.config.ref.retrieval_manifest,self.config.ref.retrieval_manifest_sha256)
+                    self._context_budgets=ContextBudgets(self.config.ref.context_budget_path,self.config.ref.context_budget_sha256,self._retrieval_references)
+                    self._retrieval_tokenizer=AutoTokenizer.from_pretrained(self.config.ref.teacher_model_path,local_files_only=True)
+                privileged=privileged_batch(data,self._retrieval_tokenizer,self._retrieval_references,self.config.ref.retrieval_max_context,self._context_budgets)
             result=score_native(self.teacher_policy,privileged,temperature=self.config.rollout.temperature,
                                 max_token_len=self.config.ref.log_prob_max_token_len_per_gpu,k=0)
             if not getattr(self,'_retrieval_scoring_checked',False):
