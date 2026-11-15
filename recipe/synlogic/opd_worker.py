@@ -213,6 +213,14 @@ class OPDActorWorker(AllocatedGPUWorker):
                'same_actor_object':True,'stopped_gradient':True,'extra_optimizer_updates':0,
                'teacher_mode':'current actor weights refreshed before each optimizer minibatch; no shadow, EMA or lag',
                'actual_adam_counter':int(version),'rank':self.rank,'valid_response_tokens':int(teacher.batch['response_mask'].sum())}
+        if torch.cuda.is_available():
+            free,total=torch.cuda.mem_get_info()
+            if not hasattr(self,'_allocator_settings'):
+                self._allocator_settings=torch.cuda.memory._snapshot()['allocator_settings']
+            proof['memory']={'allocated_bytes':torch.cuda.memory_allocated(),
+                             'reserved_bytes':torch.cuda.memory_reserved(),
+                             'physical_free_bytes':free,'physical_total_bytes':total,
+                             'allocator':self._allocator_settings}
         path=root/f'shared-teacher-version-rank{self.rank}.json';tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(proof));tmp.replace(path)
         from .shared_targets import record_targets
         record_targets(root,int(version),self.rank,micro,result)
