@@ -60,10 +60,20 @@ def prepare_rank_local_legacy_actor_batch(batch, minibatch, dp_size, reference_d
     batch = batch[order]
     weights = torch.empty(len(batch), dtype=torch.float32)
     for start in range(0, len(batch), minibatch):
+        # The reference workers synchronize their microbatch count before packing.
+        # Reconstruct that MAX across the original ranks on the driver as well.
+        reference_count = max(
+            min(local_minibatch,
+                (int(batch.batch['attention_mask'][start + rank * local_minibatch:
+                    start + (rank + 1) * local_minibatch].sum())
+                 + original_micro_token_budget - 1) // original_micro_token_budget)
+            for rank in range(reference_dp))
         for rank in range(reference_dp):
             offset = start + rank * local_minibatch
             source = batch.batch[offset:offset + local_minibatch]
-            micros, indices = rearrange_micro_batches(source, original_micro_token_budget)
+            micros, indices = rearrange_micro_batches(source, original_micro_token_budget,
+                                                      same_micro_num_in_dp=False,
+                                                      min_num_micro_batch=reference_count)
             for micro, rows in zip(micros, indices):
                 tokens = micro['response_mask'].sum()
                 if tokens <= 0:
