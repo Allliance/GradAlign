@@ -27,7 +27,7 @@ class FrozenReferences:
         assert hashlib.sha256(raw).hexdigest()==self.manifest['immutable_files'][path]
         self.mapping=json.loads(gzip.decompress(raw))
         assert len(self.mapping)==13505
-        assert self.manifest['retriever_id']=='Qwen/Qwen3-Embedding-8B'
+        assert self.manifest['retriever_id']=='gradient-pairwise-student560-last-mlp-assigned-nll'
 
     def entry(self, extra):
         identity=str(int(extra['index']));entry=self.mapping[identity]
