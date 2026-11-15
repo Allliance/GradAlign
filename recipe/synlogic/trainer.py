@@ -118,12 +118,14 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
         self.val_reward_fn.records.clear()
         metrics = super()._validate()
         records = self.val_reward_fn.records
-        if len(records) != 270 * 8:
+        binding = self.config.provenance.input_contract
+        expected_ids = set(json.loads(Path(binding.path).read_text())['validation_source_ids'])
+        if len(records) != len(expected_ids) * 8:
             raise ValueError('Validation response count changed')
         by_index = {}
         for index, score in records:
             by_index.setdefault(index, []).append(score)
-        if set(by_index) != set(range(270)) or any(len(scores) != 8 for scores in by_index.values()):
+        if set(by_index) != expected_ids or any(len(scores) != 8 for scores in by_index.values()):
             raise ValueError('Validation IDs or group sizes changed')
         masks = json.loads((Path(self.config.mixture.root) / 'supervision/evaluation-masks.json').read_text())
         for name, indices in masks.items():

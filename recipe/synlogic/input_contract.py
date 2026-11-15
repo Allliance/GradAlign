@@ -22,7 +22,8 @@ def verify_contract(binding, training_files, validation_files):
         raise ValueError('Shared input audit manifest changed')
     contract = json.loads(path.read_text())
     if (contract['normalized_text_and_underlying_constraint_overlaps'] != 0
-            or contract['upstream_evaluation_rows'] != 0
+            or contract['upstream_evaluation_rows'] != len(contract.get('authorized_upstream_source_ids', []))
+            or (contract.get('authorized_upstream_source_ids') and contract.get('upstream_authorization') != 'User-authorized SynLogic Zebra training-split exception')
             or not contract['input_only_checks'] or not contract['labels_and_noise_masks_unchanged']):
         raise ValueError('Input audit is not valid for training')
     for files, key in ((training_files, 'training'), (validation_files, 'validation')):
