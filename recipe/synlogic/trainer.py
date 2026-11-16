@@ -60,6 +60,15 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
         sampler = PlanSampler(train_dataset, self.config.mixture.condition,
                               seed=self.config.data.seed, batch_size=self.config.data.train_batch_size,
                               batches_per_pass=self.config.mixture.get("batches_per_pass", 97))
+        validation_thinking = self.config.mixture.get('validation_enable_thinking')
+        if validation_thinking is not None:
+            from copy import deepcopy
+            validation_config = deepcopy(self.config.data)
+            validation_config.apply_chat_template_kwargs.enable_thinking = validation_thinking
+            if val_dataset is not None:
+                raise ValueError('Explicit validation rendering requires its frozen dataset configuration')
+            val_dataset = create_rl_dataset(self.config.data.val_files, validation_config,
+                                            self.tokenizer, self.processor)
         super()._create_dataloader(train_dataset, val_dataset, collate_fn, sampler)
         original = self.train_dataloader
         if self.config.mixture.condition == 'mixture-gradalign':
