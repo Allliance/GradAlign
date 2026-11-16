@@ -49,7 +49,14 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler):
         from verl.trainer.main_ppo import create_rl_dataset
-        if train_dataset is None:
+        if self.config.get('opd', {}).get('training_prompt_mode') == 'answer-direct-v1':
+            # Training-only wrapper. Validation keeps its original dataset,
+            # prompt, generation settings, membership and scoring unchanged.
+            assert train_dataset is None, 'Unexpected externally constructed training dataset'
+            from .training_prompt import AnswerDirectTrainingDataset
+            train_dataset = AnswerDirectTrainingDataset(self.config.data.train_files, self.tokenizer,
+                                                        self.config.data, self.processor)
+        elif train_dataset is None:
             train_dataset = create_rl_dataset(self.config.data.train_files, self.config.data, self.tokenizer, self.processor)
         from .input_contract import verify_contract
         contract = verify_contract(self.config.provenance.input_contract,

@@ -66,7 +66,12 @@ class ContextBudgets:
         assert self.rows.keys()==references.mapping.keys() and len(self.rows)==13505
         for key,row in self.rows.items():
             assert row['query_question_sha256']==references.mapping[key]['query_question_sha256']
-            assert row['max_new_tokens']==min(4096,32768-row['privileged_prompt_tokens'])>0
+            limit=min(4096,32768-row['privileged_prompt_tokens'])
+            if self.policy.get('training_prompt_mode')=='answer-direct-v1':
+                # New training wrapper is shorter; keep the original response
+                # caps rather than silently spending the freed prompt budget.
+                assert 0<row['max_new_tokens']<=limit
+            else:assert row['max_new_tokens']==limit>0
         assert {k:v['max_new_tokens'] for k,v in self.rows.items() if v['max_new_tokens']!=4096}=={'120':3990}
 
     def budget(self, extra, source, tokenizer, references):
