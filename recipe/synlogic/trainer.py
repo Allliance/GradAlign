@@ -51,6 +51,8 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
         from verl.trainer.main_ppo import create_rl_dataset
         if train_dataset is None:
             train_dataset = create_rl_dataset(self.config.data.train_files, self.config.data, self.tokenizer, self.processor)
+        if 'train_enable_thinking' in self.config.mixture:
+            train_dataset.apply_chat_template_kwargs['enable_thinking'] = self.config.mixture.train_enable_thinking
         from .input_contract import verify_contract
         contract = verify_contract(self.config.provenance.input_contract,
                                    self.config.data.train_files, self.config.data.val_files)
