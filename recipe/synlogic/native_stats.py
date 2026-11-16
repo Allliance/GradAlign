@@ -4,7 +4,7 @@ import torch
 
 
 @torch.no_grad()
-def score_native(policy,data,temperature,max_token_len,k=16,candidate_key=None,entropy=False,single_micro_batch=False):
+def score_native(policy,data,temperature,max_token_len,k=16,candidate_key=None,entropy=False,single_micro_batch=False,valid_length_planning=False):
     from verl.utils.seqlen_balancing import rearrange_micro_batches,get_reverse_idx
     assert not policy.use_fused_kernels and not policy.use_ulysses_sp and temperature>0
     model=policy.actor_module;model.eval();device=next(model.parameters()).device
@@ -16,7 +16,7 @@ def score_native(policy,data,temperature,max_token_len,k=16,candidate_key=None,e
         assert data.batch['attention_mask'].sum()<=max_token_len
         microbatches,indices=[data.batch],[list(range(len(data)))]
     else:
-        microbatches,indices=rearrange_micro_batches(batch=data.batch,max_token_len=max_token_len)
+        microbatches,indices=plan_teacher_micro_batches(data.batch,max_token_len,valid_length_planning)
     names=['chosen_lp','native_lp']+(['ids','lp'] if k else [])+(['candidate_lp'] if candidate_key else [])+(['entropy'] if entropy else [])
     parts={key:[] for key in names}
     for micro in microbatches:
@@ -54,3 +54,19 @@ def score_native(policy,data,temperature,max_token_len,k=16,candidate_key=None,e
     assert delta.max()<1e-3 and delta.mean()<1e-4,'Native sparse probability alignment failed'
     if getattr(model,'_handle',None) is not None and model._handle.uses_sharded_strategy:model._handle.reshard(True)
     return result
+
+
+def plan_teacher_micro_batches(batch, max_token_len, valid_length_planning=False):
+    """Keep native length partitions and index the original padded tensors."""
+    from verl.utils.seqlen_balancing import rearrange_micro_batches
+    if not valid_length_planning or batch['attention_mask'].shape[-1] <= max_token_len:
+        return rearrange_micro_batches(batch=batch, max_token_len=max_token_len)
+    from tensordict import TensorDict
+    lengths = batch['attention_mask'].sum(-1)
+    maximum = int(lengths.max())
+    assert maximum <= max_token_len, 'Actual teacher context exceeds frozen budget'
+    # This planning-only mask has identical row lengths. Model inputs retain
+    # all original padding, response IDs/masks, positions and native RoPE.
+    proxy = TensorDict({'attention_mask': torch.arange(maximum, device=lengths.device)[None,:] < lengths[:,None]}, batch_size=[len(batch)])
+    _, indices = rearrange_micro_batches(batch=proxy, max_token_len=max_token_len)
+    return [batch[part] for part in indices], indices

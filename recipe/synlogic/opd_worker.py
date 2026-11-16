@@ -184,7 +184,11 @@ class OPDActorWorker(AllocatedGPUWorker):
             assert not self._is_ref and self._is_actor and self.world_size==2
             assert not self._is_offload_param and self.ulysses_sequence_parallel_size==1
             assert self.config.actor.shared_teacher_token_budget>=self.config.actor.ppo_max_token_len_per_gpu
-            self.actor.shared_teacher_callback=self._shared_teacher_forward
+            if self.config.actor.get('self_current_sampled_opd', False):
+                from .self_opd import sampled_teacher
+                self.actor.self_teacher_callback=lambda mini, temperature, version: sampled_teacher(self, mini, temperature, version)
+            else:
+                self.actor.shared_teacher_callback=self._shared_teacher_forward
 
     def _shared_teacher_forward(self,micro,temperature,version):
         from .native_stats import score_native
@@ -235,7 +239,14 @@ class OPDActorWorker(AllocatedGPUWorker):
             if not hasattr(self,'_retrieval_references'):
                 self._retrieval_references=FrozenReferences(self.config.actor.retrieval_manifest,self.config.actor.retrieval_manifest_sha256)
                 self._context_budgets=ContextBudgets(self.config.actor.context_budget_path,self.config.actor.context_budget_sha256,self._retrieval_references)
-            teacher=privileged_batch(data,self.tokenizer,self._retrieval_references,self.config.actor.retrieval_max_context,self._context_budgets)
+            if self.config.actor.get('prefix_cache_path'):
+                from .prefix_cache import FrozenPrefixes, privileged_batch_cached
+                if not hasattr(self, '_self_prefixes'):
+                    self._self_prefixes=FrozenPrefixes(self.config.actor.prefix_cache_path, self.config.actor.prefix_cache_sha256,
+                        self.config.actor.retrieval_manifest_sha256, self.config.actor.context_budget_sha256)
+                teacher=privileged_batch_cached(data, self._self_prefixes, self.tokenizer.pad_token_id, self.config.actor.retrieval_max_context)
+            else:
+                teacher=privileged_batch(data,self.tokenizer,self._retrieval_references,self.config.actor.retrieval_max_context,self._context_budgets)
             # Ray deserialization consolidates TensorDict storage. Adding new
             # tensors would leave stale storage offsets used by the CPU cast.
             from tensordict import TensorDict

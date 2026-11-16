@@ -51,6 +51,14 @@ class OPDTrainer(SynLogicTrainer):
         if not hasattr(self,'_generation_context_budgets'):
             self._generation_references=FrozenReferences(settings.retrieval_manifest,settings.retrieval_manifest_sha256)
             self._generation_context_budgets=ContextBudgets(settings.context_budget_path,settings.context_budget_sha256,self._generation_references)
+        if settings.get('prefix_cache_path'):
+            from .prefix_cache import FrozenPrefixes
+            if not hasattr(self, '_generation_prefix_cache'):
+                self._generation_prefix_cache=FrozenPrefixes(settings.prefix_cache_path,settings.prefix_cache_sha256,
+                    settings.retrieval_manifest_sha256,settings.context_budget_sha256)
+            generation.non_tensor_batch['response_token_budget']=np.asarray([self._generation_prefix_cache.budget(extra) for extra in batch.non_tensor_batch['extra_info']],dtype=np.int64)
+            generation.meta_info['context_budget_sha256']=settings.context_budget_sha256
+            return
         mask=generation.batch['attention_mask'].bool()
         budgets=[self._generation_context_budgets.budget(extra,generation.batch['input_ids'][i,mask[i]].tolist(),self.tokenizer,self._generation_references)
                  for i,extra in enumerate(batch.non_tensor_batch['extra_info'])]
@@ -72,12 +80,16 @@ class OPDTrainer(SynLogicTrainer):
             batch.meta_info['retrieval_manifest_sha256']=settings.retrieval_manifest_sha256
             if settings.get('shared_current_opsd',False):
                 assert self.config.actor_rollout_ref.actor.shared_current_opsd
-                loss=self.config.actor_rollout_ref.actor.policy_loss
-                assert loss.beta==0 and loss.full_logit_distill and loss.top_k_distill==100 and loss.distill_add_tail and loss.jsd_token_clip==.05
+                sampled=self.config.actor_rollout_ref.actor.get('self_current_sampled_opd',False)
+                if sampled:
+                    assert self.config.actor_rollout_ref.actor.opd_loss_mode=='ppo_clipped_teacher'
+                else:
+                    loss=self.config.actor_rollout_ref.actor.policy_loss
+                    assert loss.beta==0 and loss.full_logit_distill and loss.top_k_distill==100 and loss.distill_add_tail and loss.jsd_token_clip==.05
                 batch.batch['outcome_advantages']=batch.batch['advantages'].detach().clone()
                 import torch
                 batch.batch['advantages']=torch.zeros_like(batch.batch['advantages'])
-                batch.meta_info.update(shared_current_opsd=True,opsd_policy_outer_step=int(self.global_steps),opd_loss_mode='shared_current_forward_kl')
+                batch.meta_info.update(shared_current_opsd=True,opsd_policy_outer_step=int(self.global_steps),opd_loss_mode='ppo_clipped_teacher' if sampled else 'shared_current_forward_kl',self_current_sampled_opd=sampled)
                 from src.noise_diagnostics import snapshot_due
                 import torch
                 capture=snapshot_due(int(self.global_steps),self.config.trainer.test_freq,self.config.trainer.total_training_steps)
@@ -86,12 +98,18 @@ class OPDTrainer(SynLogicTrainer):
                 mini=self.config.actor_rollout_ref.actor.ppo_mini_batch_size*self.config.actor_rollout_ref.rollout.n
                 assert len(batch)==5*mini and self.config.actor_rollout_ref.actor.ppo_epochs==1
                 batch.batch['opsd_teacher_policy_version']=((int(self.global_steps)-1)*5+torch.arange(len(batch))//mini)
+                if sampled:
+                    batch.batch['self_opd_noisy']=torch.tensor(batch.non_tensor_batch['diagnostic_is_noisy'].tolist(),dtype=torch.bool)
+                    ids={key:i for i,key in enumerate(dict.fromkeys(map(str,batch.non_tensor_batch['uid'])))}
+                    batch.batch['self_opd_group']=torch.tensor([ids[str(key)] for key in batch.non_tensor_batch['uid']],dtype=torch.long)
                 if capture:
                     from .shared_targets import record_rows
                     record_rows(os.environ['SYNLOGIC_RUN_ROOT'],int(self.global_steps),batch.non_tensor_batch['diagnostic_rollout_id'],settings.retrieval_manifest_sha256)
                 metrics.update({'opsd/shared_current_teacher':1.,'opsd/frozen_teacher':0.,'opsd/teacher_gpu_count':0.,
                                 'opsd/teacher_top_k':100.,'opsd/vocabulary_clip':.05,'opsd/teacher_refresh_each_optimizer_minibatch':1.,
                                 'opsd/reference_kl_coefficient':0.,'opsd/outcome_coefficient':0.})
+                if sampled:
+                    metrics.update({'opsd/teacher_top_k':0.,'opsd/vocabulary_clip':0.,'opsd/sampled_PPO_baseline':1.,'opsd/objective_version':2.})
                 return batch
         if settings.get('oracle_opsd',False):
             assert self.config.actor_rollout_ref.actor.oracle_opsd
