@@ -172,6 +172,7 @@ class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
                 data.update(trainer.alignment_metrics)
                 data['mixture/world_size'] = trainer.config.trainer.n_gpus_per_node
                 data['training/outer_step']=step
+                data['training/objective_version']=trainer.config.opd.get('objective_version',1)
                 data['training/recovery_lineage']=logging_lineage
                 data['training/logging_step']=step+logging_offset
                 return super().log(data, step+logging_offset)
