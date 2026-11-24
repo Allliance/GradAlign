@@ -1,0 +1,199 @@
+"""SynLogic validation and reproducible dataset-size/noise baselines."""
+
+import json
+from pathlib import Path
+
+import torch
+
+from src.dapo_ray_trainer import RayDAPOTrainer
+from .sampling import PlanDataLoader, PlanSampler
+from .alignment import AlignmentLoader, AlignmentMixin
+
+
+class ValidationRecorder:
+    def __init__(self, reward):
+        self.reward, self.records = reward, []
+
+    def __call__(self, data, return_dict=False):
+        result = self.reward(data, return_dict=True)
+        for i, score in enumerate(result['reward_tensor'].sum(-1).tolist()):
+            self.records.append((int(data[i].non_tensor_batch['extra_info']['index']), score))
+        return result if return_dict else result['reward_tensor']
+
+
+class PoolReward:
+    def __init__(self, reward, condition):
+        self.reward, self.condition, self.metrics = reward, condition, {}
+
+    def __call__(self, data, return_dict=False):
+        result = self.reward(data, return_dict=True)
+        pools = [extra.get('pool', 'all') for extra in data.non_tensor_batch['extra_info']]
+        small = sum(pool == 'small' for pool in pools)
+        self.metrics = {'mixture/small_prompt_fraction': small / len(pools)}
+        if self.condition == 'mixture-gradient-equal':
+            if not all(pool in ('small', 'large') for pool in pools):
+                raise ValueError('Gradient weighting requires frozen pool membership')
+            weights = [15610 / (2 * (156 if pool == 'small' else 15454)) for pool in pools]
+            data.batch['sample_weights'] = torch.tensor(weights, dtype=torch.float32)
+            self.metrics['mixture/mean_loss_weight'] = sum(weights) / len(weights)
+        return result if return_dict else result['reward_tensor']
+
+
+HISTORICAL_VALIDATION_IDS = tuple(range(270))
+
+
+def expected_validation_ids(contract):
+    """Frozen-contract validation IDs; contracts that predate the field used 0..269."""
+    return set(contract.get('validation_source_ids', HISTORICAL_VALIDATION_IDS))
+
+
+class SynLogicTrainer(AlignmentMixin, RayDAPOTrainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.val_reward_fn = ValidationRecorder(self.val_reward_fn)
+        self.reward_fn = PoolReward(self.reward_fn, self.config.mixture.condition)
+        self.alignment_metrics = {}
+
+    def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler):
+        from verl.trainer.main_ppo import create_rl_dataset
+        if train_dataset is None:
+            train_dataset = create_rl_dataset(self.config.data.train_files, self.config.data, self.tokenizer, self.processor)
+        from .input_contract import verify_contract
+        contract = verify_contract(self.config.provenance.input_contract,
+                                   self.config.data.train_files, self.config.data.val_files)
+        ids = [int(v['index']) for v in train_dataset.dataframe['extra_info']]
+        if ids != contract['source_ids']:
+            raise ValueError('Actual loaded training rows differ from the shared input contract')
+        sampler = PlanSampler(train_dataset, self.config.mixture.condition,
+                              seed=self.config.data.seed, batch_size=self.config.data.train_batch_size,
+                              batches_per_pass=self.config.mixture.get("batches_per_pass", 97))
+        super()._create_dataloader(train_dataset, val_dataset, collate_fn, sampler)
+        original = self.train_dataloader
+        if self.config.mixture.condition == 'mixture-gradalign':
+            self.train_dataloader = AlignmentLoader(train_dataset, original.batch_size,
+                                                    self.select_aligned, seed=self.config.data.seed)
+        else:
+            self.train_dataloader = PlanDataLoader(dataset=train_dataset, batch_size=original.batch_size,
+                                                 num_workers=0, drop_last=True,
+                                                 collate_fn=original.collate_fn, sampler=sampler)
+
+    def _balance_batch(self, batch, metrics, logging_prefix="global_seqlen"):
+        reference_dp = self.config.mixture.get('canonical_reference_dp')
+        if reference_dp is None:
+            return super()._balance_batch(batch, metrics, logging_prefix)
+        from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
+        lengths = batch.batch['attention_mask'].view(len(batch), -1).sum(-1).tolist()
+        partitions = get_seqlen_balanced_partitions(lengths, k_partitions=reference_dp, equal_size=True)
+        batch.reorder(torch.tensor([row for partition in partitions for row in partition]))
+        metrics.update(log_seqlen_unbalance(seqlen_list=lengths, partitions=partitions, prefix=logging_prefix))
+
+    def _actor_update_batch(self, batch):
+        reference_dp = self.config.mixture.get('canonical_reference_dp')
+        if reference_dp is not None:
+            if not self.config.trainer.balance_batch or self.config.get('opd', {}).get('enabled', False):
+                raise ValueError('Historical rank-local dispatch requires original balancing and no OPD')
+            from .parallelism import prepare_rank_local_legacy_actor_batch
+            minibatch = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+            dp = self.actor_rollout_wg.world_size // self.config.actor_rollout_ref.actor.ulysses_sequence_parallel_size
+            return prepare_rank_local_legacy_actor_batch(batch, minibatch, dp, reference_dp,
+                                                        self.config.mixture.legacy_microbatch_token_budget)
+        if not self.config.mixture.get('preserve_global_minibatches', False):
+            return super()._actor_update_batch(batch)
+        if self.config.trainer.balance_batch or self.config.get('opd', {}).get('enabled', False):
+            raise ValueError('Clean RLVR dispatch requires fixed optimizer groups and no OPD')
+        from .parallelism import prepare_legacy_actor_batch
+        minibatch = self.config.actor_rollout_ref.actor.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        dp = self.actor_rollout_wg.world_size // self.config.actor_rollout_ref.actor.ulysses_sequence_parallel_size
+        return prepare_legacy_actor_batch(batch, minibatch, dp, self.config.mixture.legacy_microbatch_token_budget)
+
+    def _save_checkpoint(self):
+        folder = Path(self.config.trainer.default_local_dir) / f'global_step_{self.global_steps}'
+        folder.mkdir(parents=True, exist_ok=True)
+        state = {'step': self.global_steps, 'protocol_id': self.config.provenance.protocol_id,
+                 'prompt_template_sha256': self.config.provenance.prompt_template_sha256,
+                 'condition': self.config.mixture.condition, 'world_size': self.config.trainer.n_gpus_per_node,
+                 'expected_model_layers': self.config.provenance.get('model_layers', 36),
+                 'expected_model_parameters': self.config.provenance.get('model_parameters', None),
+                 'optimizer_updates': self.global_steps * (self.config.data.train_batch_size // self.config.actor_rollout_ref.actor.ppo_mini_batch_size)}
+        state['data_fingerprint'] = self.config.provenance.data_fingerprint
+        if self.config.provenance.get('input_contract'):
+            state['input_contract_sha256'] = self.config.provenance.input_contract.sha256
+        if self.config.get('opd', {}).get('enabled', False):
+            state['initial_source_step'] = self.config.opd.get('source_step', 300)
+            state['teacher_fingerprint'] = self.config.opd.teacher_fingerprint
+        path = folder / 'experiment_state.json'
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(state, indent=2) + '\n')
+        temporary.replace(path)
+        super()._save_checkpoint()
+
+    def _load_checkpoint(self):
+        result = super()._load_checkpoint()
+        if self.global_steps:
+            folder = Path(self.config.trainer.default_local_dir) / f'global_step_{self.global_steps}'
+            if self.config.trainer.resume_mode == 'resume_path':
+                folder = Path(self.config.trainer.resume_from_path)
+            state = json.loads((folder / 'experiment_state.json').read_text())
+            if (state['step'] != self.global_steps or state['protocol_id'] != self.config.provenance.protocol_id
+                    or state['prompt_template_sha256'] != self.config.provenance.prompt_template_sha256
+                    or state['world_size'] != self.config.trainer.n_gpus_per_node
+                    or (state.get('expected_model_parameters') is not None and state['expected_model_parameters'] != self.config.provenance.get('model_parameters'))):
+                raise ValueError('Incompatible full-state recovery checkpoint')
+            if state.get('data_fingerprint', self.config.provenance.data_fingerprint) != self.config.provenance.data_fingerprint:
+                raise ValueError('Checkpoint training-input fingerprint differs')
+            if self.config.get('opd', {}).get('enabled', False):
+                if (state.get('teacher_fingerprint', self.config.opd.teacher_fingerprint) != self.config.opd.teacher_fingerprint
+                        or state.get('initial_source_step', self.config.opd.get('source_step', 300)) != self.config.opd.get('source_step', 300)):
+                    raise ValueError('Checkpoint distillation source differs')
+                if self.config.opd.get('source_step', 300) == 0 and not all(
+                        key in state for key in ('data_fingerprint', 'teacher_fingerprint', 'initial_source_step')):
+                    raise ValueError('Base-start recovery requires frozen data and teacher provenance')
+        return result
+
+    def _validate(self):
+        self.val_reward_fn.records.clear()
+        metrics = super()._validate()
+        # Opt-in, separately versioned reporting: report only the val-core label
+        # masks. Generation, scoring, response order and budget are unchanged.
+        if self.config.trainer.get('label_only_reporting', False):
+            metrics = {key: value for key, value in metrics.items() if not key.startswith('val')}
+        records = self.val_reward_fn.records
+        binding = self.config.provenance.input_contract
+        expected_ids = expected_validation_ids(json.loads(Path(binding.path).read_text()))
+        if len(records) != len(expected_ids) * 8:
+            raise ValueError('Validation response count changed')
+        by_index = {}
+        for index, score in records:
+            by_index.setdefault(index, []).append(score)
+        if set(by_index) != expected_ids or any(len(scores) != 8 for scores in by_index.values()):
+            raise ValueError('Validation IDs or group sizes changed')
+        masks = json.loads((Path(self.config.mixture.root) / 'supervision/evaluation-masks.json').read_text())
+        for name, indices in masks.items():
+            scores = [score for i in indices for score in by_index[i]]
+            metrics[f'val-core/{name}/reward/mean@8'] = sum(scores) / len(scores)
+        return metrics
+
+    def _progress(self, phase, metrics=None):
+        if metrics is not None:
+            metrics['mixture/world_size'] = self.config.trainer.n_gpus_per_node
+            metrics.update(self.reward_fn.metrics)
+            metrics.update(self.alignment_metrics)
+        return super()._progress(phase, metrics)
+
+    def fit(self):
+        import verl.utils.tracking as tracking
+        original = tracking.Tracking
+        trainer = self
+
+        class MixtureTracking(original):
+            def log(self, data, step):
+                data.update(trainer.reward_fn.metrics)
+                data.update(trainer.alignment_metrics)
+                data['mixture/world_size'] = trainer.config.trainer.n_gpus_per_node
+                return super().log(data, step)
+
+        tracking.Tracking = MixtureTracking
+        try:
+            return super().fit()
+        finally:
+            tracking.Tracking = original

@@ -1,0 +1,57 @@
+"""Bind resolved inputs to one immutable, complete held-out input audit."""
+import gzip
+import hashlib
+import json
+import math
+from pathlib import Path
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for block in iter(lambda: stream.read(4 * 1024**2), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def verify_contract(binding, training_files, validation_files):
+    if not binding:
+        raise ValueError('A frozen shared input contract is required')
+    path = Path(binding['path'])
+    if sha256(path) != binding['sha256']:
+        raise ValueError('Shared input audit manifest changed')
+    contract = json.loads(path.read_text())
+    if (contract['normalized_text_and_underlying_constraint_overlaps'] != 0
+            or contract['upstream_evaluation_rows'] != len(contract.get('authorized_upstream_source_ids', []))
+            or (contract.get('authorized_upstream_source_ids') and contract.get('upstream_authorization') != 'User-authorized SynLogic Zebra training-split exception')
+            or not contract['input_only_checks'] or not contract['labels_and_noise_masks_unchanged']):
+        raise ValueError('Input audit is not valid for training')
+    for files, key in ((training_files, 'training'), (validation_files, 'validation')):
+        files = [files] if isinstance(files, (str, Path)) else list(files)
+        if len(files) != 1 or sha256(files[0]) != contract[key + '_sha256']:
+            raise ValueError('Resolved ' + key + ' input differs from the audited frozen input')
+    for key in ('input_signatures', 'heldout_signatures'):
+        if sha256(contract[key + '_path']) != contract[key + '_sha256']:
+            raise ValueError('Frozen input audit signatures changed')
+    with gzip.open(contract['input_signatures_path'], 'rt') as stream:
+        records = json.load(stream)
+    ids = [r['source_id'] for r in records]
+    if ids != contract['source_ids'] or len(ids) != contract['training_rows'] or len(set(ids)) != len(ids):
+        raise ValueError('Input audit row identities differ')
+    return contract
+
+
+def verify_fixed_coefficient(settings):
+    """Reject stale calibration flags and changed provenance before GPU startup."""
+    inherited = settings.get('historical_fixed_coefficient')
+    if not inherited:
+        return
+    path = Path(settings['calibration_file'])
+    if settings.get('calibrate') or sha256(path) != inherited['file_sha256']:
+        raise ValueError('Frozen coefficient requires calibrate=false and its unchanged source file')
+    proof = json.loads(path.read_text())
+    if (proof['teacher_coefficient'] != inherited['coefficient']
+            or not math.isfinite(proof['teacher_coefficient']) or proof['teacher_coefficient'] <= 0
+            or proof['teacher_fingerprint'] != settings['teacher_fingerprint']
+            or proof['source_step'] != settings.get('source_step', 300)):
+        raise ValueError('Frozen coefficient application provenance mismatch')
